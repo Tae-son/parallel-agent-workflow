@@ -19,11 +19,15 @@ while several AI agents work in parallel, without reading every line of every to
    descriptor 3); stdin is closed. Piping `yes` does nothing. The PR number must be typed,
    plus `gate` when gate files changed and `preview checked` when UI files changed.
 5. **Re-check before the irreversible step.** After the owner confirms, the script re-reads
-   the PR head and `main` and refuses if either moved, then merges with
-   `--match-head-commit` so GitHub also refuses a race.
+   the PR (head, state, draft flag, base branch and the CI check) and `main`, refuses if
+   anything changed, then merges with `--match-head-commit` so GitHub also refuses a race.
 6. **Untrusted text is sanitised before it reaches the terminal.** PR titles, bodies and
-   paths can carry terminal control sequences and bidirectional or zero-width characters.
-   They are replaced with `?` so a PR cannot repaint the screen or disguise a path.
+   paths can carry terminal control sequences and bidirectional, zero-width or otherwise
+   invisible characters (soft hyphen, word joiner, variation selectors, line separators).
+   They are replaced with `?` so a PR cannot repaint the screen or disguise a path, and
+   single-line fields lose embedded newlines so they cannot forge packet lines. Raw
+   non-UTF-8 bytes are left alone because they are indistinguishable from UTF-8
+   continuation bytes.
 7. **Globs from the PR never expand against the filesystem.** `set -f` is on for the whole
    run; Allowed paths are matched with `[[ == ]]` only.
 8. **Symlinks and submodules are refused outright.** Both are classic ways to smuggle content
@@ -101,5 +105,21 @@ project-specific and are not included here.
 - **The repository is detected from `origin`.** The private version hard-coded it; detection
   removes the most common adoption mistake. `--repo` still exists for cross-repository use
   and is shown prominently.
-- **No dependencies.** Bash, Git, `jq`, `gh` and Node only, so the gate works on any
-  machine the owner has and nothing in `node_modules` can alter it.
+- **No package dependencies.** Bash, GNU userland, Git, `jq`, `gh` and Node only, so the
+  gate works on any Linux machine the owner has and nothing in `node_modules` can alter it.
+- **Fetching from the target, not blindly from `origin`.** When `origin` is a different
+  GitHub repository (a fork or a mirror) and `--repo` or `LAND_REPO` names the target, PR
+  objects are fetched from the target's own URL so the SHAs being judged are the right ones.
+- **Unexpected Codex exit codes fail closed.** Only exit 2 ("did not run") lets the merge
+  continue with a visible note; a crashing or misconfigured `codex-review.sh` refuses.
+
+## Accepted limitations
+
+- The preview link is any successful deployment status on the head commit. A workflow in
+  the same repository could create one with a lookalike URL; the owner must open and judge
+  the preview, and the packet prints the environment name to help.
+- With a merge queue, `gh pr merge` succeeds on enqueue. The script says so in its final
+  message; confirm the landing on GitHub.
+- If `gh pr merge` is interrupted after GitHub committed the squash, the script cannot know;
+  it prints a message asking the owner to check the PR before retrying.
+- Tabs in paths are preserved and may misalign packet columns.

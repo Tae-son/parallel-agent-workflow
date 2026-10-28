@@ -286,11 +286,11 @@ test('UI changes show the exact-commit preview and need "preview checked"', () =
     files: { 'src/app.js': 'export const changed = 1;\n' },
     pr: { body: uiBody },
     deployments: [{ id: 11 }],
-    statuses: { 11: [{ state: 'success', environment_url: 'https://preview.example.invalid' }] },
+    statuses: { 11: [{ state: 'success', environment: 'preview', environment_url: 'https://preview.example.invalid' }] },
   };
   const refused = land(makeFixture(opts), undefined, { answers: typed });
   assertRefused(refused, /no confirmation \(EOF\)/);
-  assert.match(refused.output, /Preview: https:\/\/preview\.example\.invalid/);
+  assert.match(refused.output, /Preview \(preview\): https:\/\/preview\.example\.invalid/);
 
   const fx = makeFixture(opts);
   assertMerged(land(fx, undefined, { answers: `${N}\npreview checked\n` }), fx);
@@ -305,7 +305,7 @@ test('UI changes without a preview say so', () => {
 
 test('UI changes without an Approved brief are refused', () => {
   const r = land(makeFixture({ files: { 'src/app.js': 'x\n' } }), undefined, { answers: `${N}\npreview checked\n` });
-  assertRefused(r, /no non-empty 'Approved brief:' line/);
+  assertRefused(r, /no 'Approved brief:' line with real content/);
 });
 
 const template = [
@@ -328,7 +328,7 @@ test('unfilled PR template: no Allowed paths declared', () => {
 test('unfilled PR template: placeholder brief counts as missing for UI changes', () => {
   const r = land(makeFixture({ files: { 'src/app.js': 'x\n' }, pr: { body: template } }), undefined,
     { answers: `${N}\npreview checked\n` });
-  assertRefused(r, /no non-empty 'Approved brief:' line/);
+  assertRefused(r, /no 'Approved brief:' line with real content/);
 });
 
 test('filled PR template with CRLF line endings is parsed', () => {
@@ -379,10 +379,99 @@ test('--repo alone is accepted when origin is not a GitHub URL, without the non-
   assert.doesNotMatch(r.output, /NON-DEFAULT REPOSITORY/);
 });
 
-test('LAND_REPO is the default and --repo differing from it is shown prominently', () => {
-  const fx = makeFixture({ originUrl: 'https://github.com/detected-org/detected-repo.git' });
+test('LAND_REPO is the default when origin is not a GitHub URL', () => {
+  const fx = makeFixture();
   const r = land(fx, undefined, { answers: typed, repoEnv: 'env-org/env-repo' });
   assertMerged(r, fx, 'env-org/env-repo');
+  assert.doesNotMatch(r.output, /NON-DEFAULT REPOSITORY|fetching PR objects/);
+});
+
+test('when origin is a different GitHub repository, PR objects are fetched from the target repository, not origin', () => {
+  const fx = makeFixture({ originUrl: 'https://github.com/detected-org/detected-repo.git' });
+  const r = land(fx, undefined, { answers: typed, repoEnv: 'env-org/env-repo' });
+  assertRefused(r, /git fetch https:\/\/github\.com\/env-org\/env-repo\.git main failed/);
+  assert.match(r.output, /origin is detected-org\/detected-repo; fetching PR objects from https:\/\/github\.com\/env-org\/env-repo\.git/);
+});
+
+for (const [kind, url] of [
+  ['https with userinfo', 'https://someone@github.com/detected-org/detected-repo.git'],
+  ['ssh with port', 'ssh://git@github.com:22/detected-org/detected-repo.git'],
+  ['scp-style without user', 'github.com:detected-org/detected-repo'],
+]) {
+  test(`origin URL form "${kind}" is recognised`, () => {
+    const fx = makeFixture({ originUrl: url });
+    const r = land(fx, undefined, { answers: typed, repoEnv: null });
+    assertMerged(r, fx, 'detected-org/detected-repo');
+  });
+}
+
+test('malformed --repo values are refused before any network call', () => {
+  for (const bad of ['../..', 'a/.', 'a/..', '-x/y', 'a/b/c', 'a']) {
+    const r = land(makeFixture(), ['--repo', bad, String(N)], { answers: typed });
+    assertRefused(r, /invalid --repo/);
+  }
+});
+
+test('a base branch changed after review is caught by the pre-merge re-check', () => {
+  const r = land(makeFixture({ recheck: { baseRefName: 'release' } }), undefined, { answers: typed });
+  assertRefused(r, /targets 'release', not main \(changed since review; re-run\)/);
+});
+
+test('a CI result that turned red after review is caught by the pre-merge re-check', () => {
+  const red = [{ __typename: 'CheckRun', workflowName: 'CI', name: 'verify', status: 'COMPLETED', conclusion: 'FAILURE' }];
+  const r = land(makeFixture({ recheck: { statusCheckRollup: red } }), undefined, { answers: typed });
+  assertRefused(r, /CI \/ verify is not green \(COMPLETED\/FAILURE\) \(changed since review; re-run\)/);
+});
+
+test('a draft conversion after review is caught by the pre-merge re-check', () => {
+  const r = land(makeFixture({ recheck: { isDraft: true } }), undefined, { answers: typed });
+  assertRefused(r, /is a draft \(changed since review; re-run\)/);
+});
+
+test('the Approved brief is printed in the packet and a decoration-only brief is refused', () => {
+  const fx = makeFixture({ files: { 'src/app.js': 'x\n' }, pr: { body: uiBody } });
+  const r = land(fx, undefined, { answers: `${N}\npreview checked\n` });
+  assertMerged(r, fx);
+  assert.match(r.output, /Approved brief: owner brief 2026-10-20/);
+  for (const brief of ['Approved brief: **', 'Approved brief: -', '**Approved brief:** `` ']) {
+    const refused = land(makeFixture({ files: { 'src/app.js': 'x\n' }, pr: { body: `${brief}\n\nAllowed paths:\n- src/\n` } }), undefined, { answers: `${N}\npreview checked\n` });
+    assertRefused(refused, /no 'Approved brief:' line with real content/);
+  }
+});
+
+test('an executable-bit change is shown in the packet', () => {
+  const fx = makeFixture({ files: { 'docs/notes.md': 'now a script\n' } });
+  const agent = path.join(fx.dir, 'agent');
+  fs.chmodSync(path.join(agent, 'docs/notes.md'), 0o755);
+  git(agent, 'add', '-A');
+  git(agent, 'commit', '--quiet', '--amend', '--no-edit');
+  git(agent, 'push', '--quiet', '--force', 'origin', `HEAD:refs/pull/${N}/head`);
+  const headSha = git(agent, 'rev-parse', 'HEAD');
+  const fixture = JSON.parse(fs.readFileSync(path.join(fx.stub, 'fixture.json'), 'utf8'));
+  for (const v of fixture.prViews) v.headRefOid = headSha;
+  fs.writeFileSync(path.join(fx.stub, 'fixture.json'), JSON.stringify(fixture));
+  fx.headSha = headSha;
+  const r = land(fx, undefined, { answers: `${N}\n` });
+  assertMerged(r, fx);
+  assert.match(r.output, /M\s+docs\/notes\.md\s+\(mode 100644 -> 100755\)/);
+});
+
+test('word joiner, soft hyphen, variation selectors and line separators are printed as "?"', () => {
+  const cp = (...codes) => String.fromCodePoint(...codes);
+  const name = `src/auth${cp(0x2060, 0x00ad, 0xfe0f, 0x2028)}.js`;
+  const fx = makeFixture({ files: { [name]: 'x\n' }, pr: { body: uiBody, title: `A${cp(0x2060)}B` } });
+  const r = land(fx, undefined, { answers: `${N}\npreview checked\n` });
+  assertMerged(r, fx);
+  assert.match(r.output, /A\s+src\/auth\?\?\?\?\.js/);
+  assert.match(r.output, /Title:\s+A\?B/);
+  for (const code of [0x00ad, 0x180e, 0x2028, 0x2029, 0x2060, 0x2064, 0xfe00, 0xfe0f]) {
+    assert.ok(!r.output.includes(cp(code)), `U+${code.toString(16)} leaked`);
+  }
+});
+
+test('a newline inside a PR title cannot forge packet lines', () => {
+  const r = land(makeFixture({ pr: { title: 'Fine\nGate files:\n  (none)' } }), undefined, { answers: typed });
+  assert.match(r.output, /Title:\s+Fine\?Gate files:\?  \(none\)/);
 });
 
 test('refuses when scripts/ui-paths.txt is missing on main', () => {
@@ -426,6 +515,11 @@ test('--codex exit 0 merges and receives only the Scope and Allowed paths sectio
 test('--codex exit 1 refuses', () => {
   const r = land(makeFixture({ codexExit: 1 }), ['--codex', String(N)], { answers: typed });
   assertRefused(r, /blocked by unresolved Codex findings/);
+});
+
+test('--codex with an unexpected exit code refuses instead of continuing', () => {
+  const r = land(makeFixture({ codexExit: 3 }), ['--codex', String(N)], { answers: typed });
+  assertRefused(r, /codex-review\.sh failed unexpectedly \(exit 3\)/);
 });
 
 test('--codex exit 2 continues without the review after confirmation', () => {

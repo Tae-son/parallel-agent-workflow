@@ -50,8 +50,10 @@ Then, in your repository:
    every merge goes through `scripts/land.sh <PR#>` from the primary checkout of `main`.
 4. In every clone: `git config core.hooksPath .githooks`.
 
-Run the kit's own tests any time with `npm test` (Node 20 or newer, Git, `jq`, `gh` and
-util-linux `script` for the terminal-driven tests).
+Run the kit's own tests any time with `npm test`. Requirements, for the tests and for the
+scripts themselves: Linux with bash 5, GNU coreutils, sed, awk and grep, Git 2.40 or newer,
+`jq`, the GitHub CLI `gh`, Node 20 or newer, and util-linux `script` for the terminal-driven
+tests.
 
 ## How a change flows
 
@@ -96,8 +98,11 @@ These are guardrails, not a security boundary. A determined process can evade th
 hook (it lists its known gaps in its header) and any clone can omit the Git hook. GitHub
 branch protection or rulesets remain the enforced layer; use them when your plan allows.
 `land.sh` protects only merges that go through it, and nothing stops a merge made from
-GitHub's web page. See [docs/design.md](docs/design.md) for the threat model and the
-reasoning behind each rule.
+GitHub's web page. The preview link it prints is whatever successful deployment exists for
+the head commit, which a workflow in the same repository could have created, so the owner
+still has to open it and judge it. With a merge queue enabled, `gh pr merge` reports success
+when the PR is enqueued, not when it lands. See [docs/design.md](docs/design.md) for the
+threat model and the reasoning behind each rule.
 
 ## License
 

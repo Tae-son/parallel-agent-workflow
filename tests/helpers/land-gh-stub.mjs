@@ -26,7 +26,7 @@ if (cmd === 'pr' && sub === 'view') {
 } else if (cmd === 'pr' && sub === 'merge') {
   fs.appendFileSync(`${dir}/merge.log`, `${args.join(' ')}\n`);
   process.stdout.write('merged\n');
-} else if (cmd === 'api' && /\/contents\/scripts\/land\.sh\?ref=main$/.test(sub)) {
+} else if (cmd === 'api' && /\/contents\/scripts\/land\.sh\?ref=[0-9a-f]{40}$/.test(sub)) {
   if (!fx.landSha) fail('gh: Not Found (HTTP 404)');
   out({ sha: fx.landSha });
 } else if (cmd === 'api' && /\/commits\/main$/.test(sub)) {

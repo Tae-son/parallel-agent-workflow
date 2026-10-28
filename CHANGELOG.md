@@ -24,3 +24,14 @@ Changes from the private version: the repository is detected from the `origin` U
 `scripts/ui-paths.txt` and `scripts/risky-paths.txt`, read from `main` like `gate-files.txt`;
 the pre-push override is `ALLOW_MAIN_PUSH`; the Codex state directory is `land-gate`; the
 Codex binary is found on `PATH` or via `CODEX_BIN`.
+
+Hardening found by adversarial review during extraction: the pre-merge re-check now also
+compares base branch, draft flag and the CI result; PR objects are fetched from the target
+repository when `origin` is a different GitHub repository; `land.sh` is verified against the
+same `main` commit used for everything else; more invisible Unicode code points are
+sanitised and single-line fields lose embedded newlines; the Approved brief is printed and
+must contain real content; executable-bit changes are shown; gate-file diffs ignore colour
+settings; unexpected `codex-review.sh` exit codes refuse instead of continuing; repository
+names are validated; the installer refuses symlinks and non-regular files, never changes an
+existing `core.hooksPath`, merges or refuses malformed `.claude/settings.json` without
+aborting, and reports what it wrote even when it aborts.
