@@ -10,9 +10,9 @@ usage() {
   cat <<'EOT'
 Usage: install.sh [--owner GITHUB_LOGIN] [--force] [--no-tests] [--no-hooks-path] [--] TARGET_DIR
 
-Copies the merge gate, guard hooks, CI workflow, PR template, CONTRIBUTING, the agent
-workflow skill (for Claude Code in .claude/skills/ and for Codex in .agents/skills/) and the
-kit's tests into TARGET_DIR, which must be the top level of a Git repository.
+Copies the merge gate, guard hooks, CI workflow, PR template, CONTRIBUTING, AGENTS.md, the
+agent workflow skill (for Claude Code in .claude/skills/ and for Codex in .agents/skills/)
+and the kit's tests into TARGET_DIR, which must be the top level of a Git repository.
 
   --owner LOGIN     write .github/CODEOWNERS as "* @LOGIN" (otherwise a placeholder)
   --force           overwrite existing regular files (symlinks, hard links to other files,
@@ -76,6 +76,7 @@ FILES=(
   .claude/hooks/agent-guard.mjs
   .claude/skills/parallel-agent-workflow/SKILL.md
   .agents/skills/parallel-agent-workflow/SKILL.md
+  AGENTS.md
   CONTRIBUTING.md
 )
 TEST_FILES=(
@@ -153,6 +154,33 @@ for f in "${FILES[@]}"; do put "$f" "$KIT/$f"; done
 sk=skills/parallel-agent-workflow/SKILL.md
 if [ -f "$TARGET/.claude/$sk" ] && [ -f "$TARGET/.agents/$sk" ] && ! cmp -s -- "$TARGET/.claude/$sk" "$TARGET/.agents/$sk"; then
   notes+=(".claude/$sk and .agents/$sk differ (an existing copy was kept); Claude Code and Codex will follow different instructions until you make them identical")
+fi
+# AGENTS.md routes every agent to the rules. Claude Code reads CLAUDE.md instead of it unless a
+# CLAUDE.md imports it ("@path", resolved from the importing file's directory). Detection is
+# deliberately conservative: only an import on a line of its own, outside fenced blocks, counts,
+# so the worst case is an unneeded note rather than a missing one. Files are read, never edited.
+if [[ " ${skipped[*]-} " == *' AGENTS.md '* ]]; then
+  notes+=("AGENTS.md already exists and was left unchanged, so the kit's agent rules were not added; merge $KIT/AGENTS.md into it by hand")
+fi
+claude_md=() imports=0
+for f in CLAUDE.md .claude/CLAUDE.md CLAUDE.local.md; do
+  [ -f "$TARGET/$f" ] || continue
+  claude_md+=("$f")
+  case $f in .claude/*) want='\.\./AGENTS\.md' ;; *) want='(\./)?AGENTS\.md' ;; esac
+  # A fence closes only on a bare run of the same character at least as long as the opener.
+  RE="^[[:space:]]*@$want[[:space:]]*\$" LC_ALL=C awk '
+    match($0, /^[[:space:]]*(````*|~~~~*)/) {
+      d = substr($0, RSTART, RLENGTH); sub(/^[[:space:]]*/, "", d)
+      if (fence == "") fence = d
+      else if (substr(d, 1, 1) == substr(fence, 1, 1) && length(d) >= length(fence) && $0 ~ /^[[:space:]]*(`+|~+)[[:space:]]*$/) fence = ""
+      next
+    }
+    fence == "" && $0 ~ ENVIRON["RE"] { found = 1 }
+    END { exit !found }' "$TARGET/$f" 2>/dev/null && imports=1
+done
+if [ ${#claude_md[@]} -gt 0 ] && (( ! imports )); then
+  case ${claude_md[0]} in .claude/*) import_line=@../AGENTS.md ;; *) import_line=@AGENTS.md ;; esac
+  notes+=("Claude Code reads ${claude_md[*]} instead of AGENTS.md; unless it already imports it, add a line $import_line to ${claude_md[0]} so it loads the agent rules")
 fi
 # CI_STATE: installed (written now), kept (an existing file was left alone) or refused.
 CI_STATE=refused
