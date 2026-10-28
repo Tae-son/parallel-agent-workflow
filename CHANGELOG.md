@@ -32,6 +32,11 @@ same `main` commit used for everything else; more invisible Unicode code points 
 sanitised and single-line fields lose embedded newlines; the Approved brief is printed and
 must contain real content; executable-bit changes are shown; gate-file diffs ignore colour
 settings; unexpected `codex-review.sh` exit codes refuse instead of continuing; repository
-names are validated; the installer refuses symlinks and non-regular files, never changes an
-existing `core.hooksPath`, merges or refuses malformed `.claude/settings.json` without
-aborting, and reports what it wrote even when it aborts.
+names are validated; gate-file diffs use `--text` so a planted NUL cannot hide a diff behind
+"Binary files differ"; pattern lists survive NUL or invalid bytes; git runs with hooks
+disabled and the primary worktree must be checked out at `main`; submodule entries are
+listed regardless of `diff.ignoreSubmodules`; origin hosts match case-insensitively; the
+installer refuses symlinks, hard links, non-regular files and nested repositories, writes
+atomically and records only successful writes, never changes an existing local
+`core.hooksPath`, ignores inherited `GIT_CONFIG` and `CDPATH`, merges or refuses malformed
+`.claude/settings.json` without aborting, and exits 2 after a partial install.

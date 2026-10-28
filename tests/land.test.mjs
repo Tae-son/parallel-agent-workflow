@@ -518,6 +518,68 @@ test('--codex exit 1 refuses', () => {
   assertRefused(r, /blocked by unresolved Codex findings/);
 });
 
+test('a gate file made to look binary by a NUL byte still has its diff printed in full', () => {
+  const fx = makeFixture({ files: { 'tests/evil.test.mjs': '// v2 \0 nul in a comment\nexport const planted = 1;\n' } });
+  const r = land(fx, undefined, { answers: `${N}\ngate\n` });
+  assertMerged(r, fx);
+  assert.doesNotMatch(r.output, /Binary files/);
+  assert.match(r.output, /\+\/\/ v2 \? nul in a comment/);
+  assert.match(r.output, /\+export const planted = 1;/);
+});
+
+test('a NUL byte in ui-paths.txt on main does not switch the UI gate off', () => {
+  const fx = makeFixture({ files: { 'src/app.js': 'x\n' }, uiListText: 'src/*\nsrc/x\0y/*\n*.css\n' });
+  const r = land(fx, undefined, { answers: typed });
+  assertRefused(r, /no 'Approved brief:' line with real content/);
+});
+
+test('a submodule (gitlink) in the diff is refused', () => {
+  const fx = makeFixture();
+  const agent = path.join(fx.dir, 'agent');
+  git(agent, 'update-index', '--add', '--cacheinfo', `160000,${fx.mainSha},vendor/lib`);
+  git(agent, 'commit', '--quiet', '-m', 'add gitlink');
+  git(agent, 'push', '--quiet', '--force', 'origin', `HEAD:refs/pull/${N}/head`);
+  const headSha = git(agent, 'rev-parse', 'HEAD');
+  const fixture = JSON.parse(fs.readFileSync(path.join(fx.stub, 'fixture.json'), 'utf8'));
+  for (const v of fixture.prViews) v.headRefOid = headSha;
+  fs.writeFileSync(path.join(fx.stub, 'fixture.json'), JSON.stringify(fixture));
+  const r = land(fx, undefined, { answers: typed });
+  assertRefused(r, /symlink or submodule/);
+  assert.match(r.output, /A\s+vendor\/lib/);
+});
+
+test('refuses when the primary worktree is not checked out at main', () => {
+  const fx = makeFixture();
+  git(fx.primary, 'switch', '--quiet', '-c', 'try-pr', `refs/remotes/origin/main`);
+  fs.writeFileSync(path.join(fx.primary, 'docs/extra.md'), 'x\n');
+  git(fx.primary, 'add', '-A');
+  git(fx.primary, 'commit', '--quiet', '-m', 'local experiment');
+  const r = land(fx, undefined, { answers: typed });
+  assertRefused(r, /primary worktree is not at example-org\/example-repo main/);
+});
+
+test('--repo= with an empty value is refused and "--" ends option parsing', () => {
+  assertRefused(land(makeFixture(), ['--repo=', String(N)], { answers: typed }), /--repo needs OWNER\/NAME/);
+  const fx = makeFixture();
+  assertMerged(land(fx, ['--', String(N)], { answers: typed }), fx);
+});
+
+test('every GitHub API call targets the --repo value, not the default', () => {
+  const fx = makeFixture();
+  assertMerged(land(fx, ['--repo', 'other/repo', String(N)], { answers: `other/repo#${N}\n` }), fx, 'other/repo');
+  const calls = fs.readFileSync(path.join(fx.stub, 'calls.log'), 'utf8').trim().split('\n');
+  const api = calls.filter((c) => c.startsWith('api '));
+  assert.ok(api.length >= 4, calls.join('\n'));
+  for (const c of api) assert.match(c, /^api repos\/other\/repo\//, c);
+  for (const c of calls.filter((c) => c.startsWith('pr '))) assert.match(c, / -R other\/repo( |$)/, c);
+});
+
+test('origin host and .git suffix are matched case-insensitively', () => {
+  const fx = makeFixture({ originUrl: 'https://GitHub.com/detected-org/detected-repo.GIT' });
+  const r = land(fx, undefined, { answers: typed, repoEnv: null });
+  assertMerged(r, fx, 'detected-org/detected-repo');
+});
+
 test('--codex with an unexpected exit code refuses instead of continuing', () => {
   const r = land(makeFixture({ codexExit: 3 }), ['--codex', String(N)], { answers: typed });
   assertRefused(r, /codex-review\.sh failed unexpectedly \(exit 3\)/);

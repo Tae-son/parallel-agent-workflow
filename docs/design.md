@@ -11,7 +11,10 @@ while several AI agents work in parallel, without reading every line of every to
    names the scope and the Allowed paths. The PR body carries both so the gate can show what
    fell outside them.
 3. **The gate trusts only `main`'s exact commit on GitHub.** `land.sh` refuses to run unless
-   it is byte-identical to `scripts/land.sh` on GitHub's `main`, and it reads
+   it is byte-identical to `scripts/land.sh` at that commit and the primary worktree is
+   checked out at it (so `.gitattributes` and friends are `main`'s too). Every git call runs
+   with hooks disabled so that a branch tried out locally cannot execute code with the
+   owner's credentials. It reads
    `gate-files.txt`, `ui-paths.txt`, `risky-paths.txt`, `codex-review.sh` and its siblings
    from that commit, never from the working tree or the PR. A PR therefore cannot weaken the
    rules that judge it; it can only propose a change that the current rules print in full.
@@ -123,3 +126,9 @@ project-specific and are not included here.
 - If `gh pr merge` is interrupted after GitHub committed the squash, the script cannot know;
   it prints a message asking the owner to check the PR before retrying.
 - Tabs in paths are preserved and may misalign packet columns.
+- Answers typed ahead of a prompt are accepted. Draining the terminal before each prompt
+  would also break scripted terminals, so the owner is expected to read before typing.
+- The preview is the first successful status of a deployment on the head commit, even if a
+  later status marked that deployment inactive.
+- PR body parsing is Markdown-light: HTML comments are stripped everywhere, including inside
+  code spans, and a `#` line inside a fenced block ends the section being read.

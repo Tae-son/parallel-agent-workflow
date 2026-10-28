@@ -39,14 +39,20 @@ EOF
 
 die() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
+# Every git call ignores hooks from the checkout (a PR branch tried out in the primary worktree
+# must not get code executed with the owner's credentials) and submodule-ignoring config.
+git() { command git -c core.hooksPath=/dev/null -c diff.ignoreSubmodules=none "$@"; }
 # Replace C0/C1 controls (except tab/newline) so PR text cannot drive the terminal, and
-# bidi/zero-width/invisible characters (U+00AD, U+061C, U+180E, U+200B-200F, U+2028-202E,
-# U+2060-2064, U+2066-2069, U+FE00-FE0F, U+FEFF) so it cannot disguise paths. Raw non-UTF-8
+# bidi/zero-width/invisible characters (U+00AD, U+034F, U+061C, U+115F, U+1160, U+180E,
+# U+200B-200F, U+2028-202E, U+2060-2064, U+2066-206F, U+3164, U+FE00-FE0F, U+FEFF, U+FFA0,
+# U+FFF9-FFFB and the Tags block U+E0000-E007F) so it cannot disguise paths. Raw non-UTF-8
 # bytes 0x80-0x9F are left alone because they are also UTF-8 continuation bytes.
 sanitize() {
-  LC_ALL=C sed -e 's/\xc2[\x80-\x9f\xad]/?/g' -e 's/\xd8\x9c/?/g' -e 's/\xe1\xa0\x8e/?/g' \
-    -e 's/\xe2\x80[\x8b-\x8f\xa8-\xae]/?/g' -e 's/\xe2\x81[\xa0-\xa4\xa6-\xa9]/?/g' \
-    -e 's/\xef\xb8[\x80-\x8f]/?/g' -e 's/\xef\xbb\xbf/?/g' | LC_ALL=C tr '\000-\010\013-\037\177' '?'
+  LC_ALL=C sed -e 's/\xc2[\x80-\x9f\xad]/?/g' -e 's/\xcd\x8f/?/g' -e 's/\xd8\x9c/?/g' \
+    -e 's/\xe1\x85[\x9f\xa0]/?/g' -e 's/\xe1\xa0\x8e/?/g' \
+    -e 's/\xe2\x80[\x8b-\x8f\xa8-\xae]/?/g' -e 's/\xe2\x81[\xa0-\xa4\xa6-\xaf]/?/g' -e 's/\xe3\x85\xa4/?/g' \
+    -e 's/\xef\xb8[\x80-\x8f]/?/g' -e 's/\xef\xbb\xbf/?/g' -e 's/\xef\xbe\xa0/?/g' -e 's/\xef\xbf[\xb9-\xbb]/?/g' \
+    -e 's/\xf3\xa0[\x80\x81][\x80-\xbf]/?/g' | LC_ALL=C tr '\000-\010\013-\037\177' '?'
 }
 # Single-line fields (titles, URLs) additionally lose embedded newlines so they cannot forge packet lines.
 oneline() { sanitize | awk 'NR > 1 { printf "?" } { printf "%s", $0 }'; }
@@ -65,7 +71,8 @@ parse_args() {
       -h|--help) HELP=1; usage; exit 0 ;;
       --codex) CODEX=1 ;;
       --repo) [ $# -ge 2 ] || die "--repo needs OWNER/NAME"; REPO=$2; shift ;;
-      --repo=*) REPO=${1#--repo=} ;;
+      --repo=*) REPO=${1#--repo=}; [ -n "$REPO" ] || die "--repo needs OWNER/NAME" ;;
+      --) shift; while [ $# -gt 0 ]; do [ -z "$PR" ] || die "only one PR number allowed"; PR=$1; shift; done; break ;;
       -*) die "unknown option: $1" ;;
       *) [ -z "$PR" ] || die "only one PR number allowed"; PR=$1 ;;
     esac
@@ -83,12 +90,15 @@ valid_repo() {
 # OWNER/NAME from a github.com URL: https://[user@]github.com/O/N[.git], ssh://git@github.com[:port]/O/N[.git],
 # [git@]github.com:O/N[.git]. Prints nothing for anything else.
 repo_from_url() {
-  local url=${1%/}; url=${url%.git}
+  local url=${1%/}
+  shopt -s nocasematch
+  [[ $url =~ ^(.*)\.git$ ]] && url=${BASH_REMATCH[1]}
   if [[ $url =~ ^(https://([^/@]+@)?|ssh://([^/@]+@)?)github\.com(:[0-9]+)?/([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)$ ]]; then
     printf '%s/%s' "${BASH_REMATCH[5]}" "${BASH_REMATCH[6]}"
   elif [[ $url =~ ^([^/@:]+@)?github\.com:([A-Za-z0-9._-]+)/([A-Za-z0-9._-]+)$ ]]; then
     printf '%s/%s' "${BASH_REMATCH[2]}" "${BASH_REMATCH[3]}"
   fi
+  shopt -u nocasematch
 }
 
 # The repository this gate protects: $LAND_REPO, else OWNER/NAME from the primary worktree's
@@ -141,8 +151,11 @@ check_self() {
     fi
     die "could not read scripts/land.sh on $REPO main: $(sanitize <"$TMP/err")"
   fi
-  [ -n "$remote" ] || die "could not read scripts/land.sh on $REPO main: no blob SHA in the API response"
-  [ "$blob" = "$remote" ] || die "this land.sh ($blob) differs from $REPO main (${remote:-unknown}). Run 'git pull --ff-only' on main in the primary worktree and retry."
+  [[ $remote =~ ^[0-9a-f]{40}$ ]] || die "could not read scripts/land.sh on $REPO main: no blob SHA in the API response"
+  [ "$blob" = "$remote" ] || die "this land.sh ($blob) differs from $REPO main ($remote). Run 'git pull --ff-only' on main in the primary worktree and retry."
+  # The checkout supplies .gitattributes and other context to git; it must be main itself.
+  [ "$(git -C "$TOP" rev-parse HEAD)" = "$MAIN_SHA" ] \
+    || die "the primary worktree is not at $REPO main ($MAIN_SHA). Switch to main and run 'git pull --ff-only' before landing."
 }
 
 main_sha() {
@@ -185,6 +198,7 @@ read_pr() {
 check_current() {
   local behind
   behind=$(gh api "repos/$REPO/compare/$MAIN_SHA...$HEAD_SHA" </dev/null | jq -r '.behind_by') || die "compare API failed"
+  [[ $behind =~ ^[0-9]+$ ]] || die "compare API returned no behind_by count ($(oneline <<<"$behind"))"
   if [ "$behind" != 0 ]; then
     say "Branch is behind main by $(printf '%s' "$behind" | sanitize) commit(s). Update it with:"
     say "  gh pr update-branch $PR -R $REPO"
@@ -228,8 +242,9 @@ in_scope() {
 }
 
 # Pattern lists share the gate-files.txt format: one bash pattern per line, "#" comments.
+# -a: a NUL or invalid byte in the file must not make grep go silent and empty the list.
 read_patterns() { # file -> prints trimmed, non-comment, non-empty lines
-  grep -v '^[[:space:]]*#' "$1" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | grep -v '^$' || true
+  LC_ALL=C grep -av '^[[:space:]]*#' "$1" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | LC_ALL=C grep -av '^$' || true
 }
 
 # Gate patterns come from main's exact commit, never from the PR or the working tree.
@@ -269,7 +284,7 @@ wants_codex() { { [ ${#RISKY_PATTERNS[@]} -gt 0 ] && match_any "$1" "${RISKY_PAT
 classify() {
   local meta p line special='' hint=0 om nm
   BASE=$(git merge-base "$MAIN_SHA" "$HEAD_SHA") || die "no merge base between main and PR head"
-  git diff --no-renames --raw -z "$BASE" "$HEAD_SHA" >"$TMP/raw"
+  git diff --no-renames --ignore-submodules=none --raw -z "$BASE" "$HEAD_SHA" >"$TMP/raw"
   [ -s "$TMP/raw" ] || die "PR #$PR changes nothing"
   parse_globs
   : >"$TMP/in"; : >"$TMP/out"; : >"$TMP/gate"; : >"$TMP/ui"
@@ -301,19 +316,20 @@ find_preview() {
   ids=$(gh api "repos/$REPO/deployments?sha=$HEAD_SHA" 2>/dev/null </dev/null | jq -r '.[]?.id') || return 0
   for id in $ids; do
     [[ $id =~ ^[0-9]+$ ]] || continue
-    url=$(gh api "repos/$REPO/deployments/$id/statuses" 2>/dev/null </dev/null \
-      | jq -r 'first(.[]? | select(.state == "success")) | "\(.environment // "?")\t\(.environment_url // "")"') || continue
-    env=${url%%$'\t'*}; url=${url#*$'\t'}
-    if [ -n "$url" ]; then PREVIEW="Preview ($(oneline <<<"$env")): $(oneline <<<"$url")"; return 0; fi
+    gh api "repos/$REPO/deployments/$id/statuses" 2>/dev/null </dev/null >"$TMP/statuses.json" || continue
+    url=$(jq -r 'first(.[]? | select(.state == "success")) | .environment_url // empty' "$TMP/statuses.json" 2>/dev/null || true)
+    env=$(jq -r 'first(.[]? | select(.state == "success")) | .environment // "?"' "$TMP/statuses.json" 2>/dev/null || true)
+    if [ -n "$url" ]; then PREVIEW="Preview ($(oneline <<<"$env" | tr '\t' '?')): $(oneline <<<"$url" | tr '\t' '?')"; return 0; fi
   done
 }
 
 check_ui() {
   PREVIEW='No UI change'
   [ "$UI" = 1 ] || return 0
-  BRIEF=$(grep -Eim1 '^[[:space:]*_-]*approved brief[*_]*:[*_]*[[:space:]]*[^[:space:]]*[[:alnum:]]' "$TMP/body" \
-    | sed -E 's/^[[:space:]*_-]*[Aa]pproved [Bb]rief[*_]*:[*_]*[[:space:]]*//') \
+  BRIEF=$(LC_ALL=C grep -aEim1 '^[[:space:]*_-]*approved brief[*_]*:.*[[:alnum:]]' "$TMP/body" \
+    | LC_ALL=C sed -E 's/^[[:space:]*_-]*approved brief[*_]*:[*_]*[[:space:]]*//I') \
     || die "UI changed but the PR body has no 'Approved brief:' line with real content"
+  [ -n "$BRIEF" ] || die "UI changed but the PR body has no 'Approved brief:' line with real content"
   find_preview
 }
 
@@ -343,7 +359,7 @@ run_codex() {
          CODEX_RESULT="Codex review: finished (no outcome recorded; see $out)"
        fi ;;
     1) die "blocked by unresolved Codex findings (see $out)" ;;
-    2) CODEX_RESULT="Codex review did not run (exit 2); continuing without it"; say "$CODEX_RESULT" ;;
+    2) rm -rf "$out"; CODEX_RESULT="Codex review did not run (exit 2); continuing without it"; say "$CODEX_RESULT" ;;
     *) die "codex-review.sh failed unexpectedly (exit $rc); fix it on main or re-run without --codex" ;;
   esac
 }
@@ -356,7 +372,9 @@ group() {
 print_packet() {
   if [ "$GATE" = 1 ]; then
     say "${BO}==== Gate file diffs (full) ====${NO}"
-    git -c color.ui=never --literal-pathspecs diff --no-color --no-renames --no-ext-diff --no-textconv "$BASE" "$HEAD_SHA" -- "${GATE_PATHS[@]}" | sanitize
+    # --text: a NUL planted in a gate file must not collapse its diff to "Binary files differ".
+    git -c color.ui=never --literal-pathspecs diff --no-color --text --no-renames --no-ext-diff --no-textconv \
+      --ignore-submodules=none "$BASE" "$HEAD_SHA" -- "${GATE_PATHS[@]}" | sanitize
   fi
   say "${BO}==== Review packet ====${NO}"
   say "Title:    $(field .title | oneline)"

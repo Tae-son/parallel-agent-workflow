@@ -66,9 +66,9 @@ read_patterns() { # file -> array name
   local l
   arr=()
   while IFS= read -r l || [ -n "$l" ]; do
-    l=$(sed -E 's/^[[:space:]]+|[[:space:]]+$//g' <<<"$l")
+    l=$(LC_ALL=C sed -E 's/^[[:space:]]+|[[:space:]]+$//g' <<<"$l")
     [[ -z $l || $l == \#* ]] || arr+=("$l")
-  done <"$1"
+  done < <(LC_ALL=C tr -d '\000' <"$1")
 }
 read_patterns "$GATEFILE" GATES
 ((${#GATES[@]})) || { say "codex-review: $GATEFILE lists no patterns; review did not run"; exit 2; }
