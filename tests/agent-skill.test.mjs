@@ -18,6 +18,15 @@ test('the Claude and Codex skill copies are byte-identical regular files, not sy
 });
 
 for (const skill of skills) {
+  test(`${skill} routes through independent QA before owner acceptance`, () => {
+    const content = fs.readFileSync(path.join(root, skill), 'utf8');
+    assert.match(content, /## 6\. Independent QA/);
+    assert.match(content, /separate.*session/);
+    assert.match(content, /FAIL.*BLOCKED/);
+    assert.match(content, /exact.*commit/);
+    assert.match(content, /retest/);
+  });
+
   test(`${skill} begins with frontmatter naming its directory and a non-empty description`, () => {
     const content = fs.readFileSync(path.join(root, skill), 'utf8');
     const frontmatter = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);

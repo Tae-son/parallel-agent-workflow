@@ -22,6 +22,31 @@ Allowed paths:
 - [ ] I checked the affected screens or outputs, not just the build
 - [ ] I included screenshots for visible changes, or explained why none are needed
 
+## Independent QA
+
+<!-- The separate QA session replaces this BLOCKED report after testing the exact head.
+     See CONTRIBUTING.md "Independent QA". Keep exactly one active block, with these keys.
+     Use real builder/reviewer session IDs. Record every criterion and observed evidence.
+     New commits require QA retesting; do not merely update the SHA. -->
+```independent-qa
+{
+  "version": 1,
+  "head": "REPLACE_WITH_FULL_REVIEWED_SHA",
+  "builder": "REPLACE_WITH_BUILDER_SESSION",
+  "reviewer": "REPLACE_WITH_QA_SESSION",
+  "verdict": "BLOCKED",
+  "checks": [
+    {
+      "criterion": "REPLACE_WITH_ACCEPTANCE_CRITERION",
+      "result": "BLOCKED",
+      "evidence": "Independent QA has not run."
+    }
+  ],
+  "blockers": ["Awaiting independent QA."],
+  "limitations": "No independent testing performed yet."
+}
+```
+
 ## Risk and rollback
 
 - Risk level: low / medium / high

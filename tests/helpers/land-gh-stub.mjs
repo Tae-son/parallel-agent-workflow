@@ -22,7 +22,9 @@ function fail(message) {
 
 const [cmd, sub, path] = args;
 if (cmd === 'pr' && sub === 'view') {
-  out(next('pr-view', fx.prViews));
+  const view = next('pr-view', fx.prViews);
+  const fields = args[args.indexOf('--json') + 1].split(',');
+  out(Object.fromEntries(fields.filter((key) => key in view).map((key) => [key, view[key]])));
 } else if (cmd === 'pr' && sub === 'merge') {
   fs.appendFileSync(`${dir}/merge.log`, `${args.join(' ')}\n`);
   process.stdout.write('merged\n');
