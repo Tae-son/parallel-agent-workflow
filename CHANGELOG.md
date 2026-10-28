@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `AGENTS.md`: a short router for every agent (Codex and OpenCode read it at session start;
+  Claude Code reads it when there is no `CLAUDE.md`, and this repository's `CLAUDE.md` imports
+  it). It points to `CONTRIBUTING.md` and the `parallel-agent-workflow` skill and states the
+  hard rules. `install.sh` installs it when absent and notes when an existing `AGENTS.md` was
+  kept, or when `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md` exists without importing it.
 - Agent skill `parallel-agent-workflow`: walks an assigned task through resume, brief,
   preflight, build, verify and pull request, with explicit stop-and-ask conditions, and
   points to `CONTRIBUTING.md` instead of restating it. Installed for Claude Code in

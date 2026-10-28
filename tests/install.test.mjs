@@ -36,7 +36,7 @@ const EXPECTED = [
   'scripts/land.sh', 'scripts/codex-review.sh', 'scripts/agents-status.sh', 'scripts/gate-files.txt',
   'scripts/ui-paths.txt', 'scripts/risky-paths.txt', 'scripts/codex-exclude.txt', 'scripts/codex-review-contract.md',
   '.githooks/pre-push', '.github/pull_request_template.md', '.github/workflows/ci.yml', '.github/CODEOWNERS',
-  '.claude/hooks/agent-guard.mjs', '.claude/settings.json', 'CONTRIBUTING.md',
+  '.claude/hooks/agent-guard.mjs', '.claude/settings.json', 'CONTRIBUTING.md', 'AGENTS.md',
   '.claude/skills/parallel-agent-workflow/SKILL.md', '.agents/skills/parallel-agent-workflow/SKILL.md',
   'tests/agent-guard.test.mjs', 'tests/agent-skill.test.mjs', 'tests/agents-status.test.mjs', 'tests/codex-review.test.mjs',
   'tests/land.test.mjs', 'tests/pre-push-hook.test.mjs', 'tests/helpers/land-gh-stub.mjs',
@@ -53,7 +53,7 @@ test('installs every kit file into a fresh repository, byte-identical, executabl
   for (const f of ['scripts/land.sh', 'scripts/codex-review.sh', 'scripts/agents-status.sh', '.githooks/pre-push', '.claude/hooks/agent-guard.mjs']) {
     assert.ok(fs.statSync(path.join(target, f)).mode & 0o100, `${f} not executable`);
   }
-  for (const f of EXPECTED.filter((f) => f.endsWith('/SKILL.md'))) {
+  for (const f of EXPECTED.filter((f) => f === 'AGENTS.md' || f.endsWith('/SKILL.md'))) {
     assert.ok(fs.lstatSync(path.join(target, f)).isFile(), `${f} must be a regular file, not a symlink`);
     assert.equal(fs.statSync(path.join(target, f)).mode & 0o777, 0o644, `${f} must not be executable`);
   }
@@ -100,6 +100,114 @@ test('existing files are left alone without --force and overwritten with it', ()
   assert.ok(fs.readFileSync(skill).equals(fs.readFileSync(path.join(root, '.claude/skills/parallel-agent-workflow/SKILL.md'))));
   assert.equal(fs.readFileSync(path.join(target, '.github/CODEOWNERS'), 'utf8'), '* @other\n');
 });
+
+test('an existing AGENTS.md is kept and reported without --force and replaced with it', () => {
+  const target = freshRepo('existing-agents');
+  const agents = path.join(target, 'AGENTS.md');
+  const existing = Buffer.from('# Project rules\r\nKeep these instructions.\r\n');
+  fs.writeFileSync(agents, existing);
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.ok(fs.readFileSync(agents).equals(existing), 'existing AGENTS.md must stay byte-identical');
+  assert.match(r.stdout, /Left unchanged[^\n]*\n(?:[ \t]+[^\n]*\n)*?[ \t]+AGENTS\.md/);
+  assert.match(r.stdout, /Notes:\n(?:[ \t]+[^\n]*\n)*?[ \t]+[^\n]*AGENTS\.md already exists/);
+  assert.match(r.stdout, /rules[^\n]*not added/i);
+  assert.match(r.stdout, /merge[^\n]*(by hand|manually)/i);
+  assert.ok(r.stdout.includes(path.join(root, 'AGENTS.md')) || /kit[^\n]*AGENTS\.md/i.test(r.stdout), 'note must point to the kit AGENTS.md');
+  const forced = install(['--owner', 'someone', '--force', target]);
+  assert.equal(forced.status, 0, text(forced));
+  assert.ok(fs.readFileSync(agents).equals(fs.readFileSync(path.join(root, 'AGENTS.md'))));
+  assert.doesNotMatch(forced.stdout, /AGENTS\.md already exists/);
+});
+
+for (const file of ['CLAUDE.md', '.claude/CLAUDE.md', 'CLAUDE.local.md']) {
+  test(`an existing ${file} without an import gets a note and stays byte-identical even with --force`, () => {
+    const target = freshRepo(`claude-no-import-${file.replace(/\W+/g, '-')}`);
+    const claude = path.join(target, file);
+    const existing = Buffer.from('# Local instructions\r\nKeep my project rules.\r\n');
+    fs.mkdirSync(path.dirname(claude), { recursive: true });
+    fs.writeFileSync(claude, existing);
+    for (const flags of [[], ['--force']]) {
+      const r = install(['--owner', 'someone', ...flags, target]);
+      assert.equal(r.status, 0, text(r));
+      assert.ok(fs.readFileSync(claude).equals(existing), `${file} must stay byte-identical`);
+      const want = file.startsWith('.claude/') ? '@../AGENTS.md' : '@AGENTS.md';
+      assert.match(r.stdout, /Notes:\n(?:[ \t]+[^\n]*\n)*?[ \t]+[^\n]*add a line @/);
+      assert.ok(r.stdout.includes(`add a line ${want} to ${file}`), `note must ask for ${want} in ${file}`);
+      assert.match(r.stdout, /Claude Code reads/);
+      assert.match(r.stdout, /instead of AGENTS\.md/);
+      assert.ok(r.stdout.includes(file), 'note must name the Claude instructions file');
+    }
+  });
+}
+
+for (const [label, line] of [
+  ['plain', '@AGENTS.md'],
+  ['whitespace', ' \t@AGENTS.md\t '],
+  ['relative', ' \t@./AGENTS.md\t '],
+]) {
+  test(`a ${label} standalone AGENTS.md import in CLAUDE.md suppresses the import note`, () => {
+    const target = freshRepo(`claude-import-${label}`);
+    const claude = path.join(target, 'CLAUDE.md');
+    const existing = Buffer.from(`# Project instructions\n${line}\nMore instructions.\n`);
+    fs.writeFileSync(claude, existing);
+    const r = install(['--owner', 'someone', target]);
+    assert.equal(r.status, 0, text(r));
+    assert.doesNotMatch(r.stdout, /add a line @/);
+    assert.ok(fs.readFileSync(claude).equals(existing));
+  });
+}
+
+test('an import in one Claude instructions file suppresses the note for the others', () => {
+  const target = freshRepo('claude-import-one-of-many');
+  const files = ['CLAUDE.md', '.claude/CLAUDE.md', 'CLAUDE.local.md'];
+  const contents = ['# Root instructions\n', '# Nested instructions\n', '@./AGENTS.md\n'];
+  for (const [i, file] of files.entries()) {
+    fs.mkdirSync(path.dirname(path.join(target, file)), { recursive: true });
+    fs.writeFileSync(path.join(target, file), contents[i]);
+  }
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.doesNotMatch(r.stdout, /add a line @/);
+  for (const [i, file] of files.entries()) assert.equal(fs.readFileSync(path.join(target, file), 'utf8'), contents[i]);
+});
+
+test('no Claude instructions files means no import note', () => {
+  const target = freshRepo('claude-absent');
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.doesNotMatch(r.stdout, /add a line @/);
+  for (const file of ['CLAUDE.md', '.claude/CLAUDE.md', 'CLAUDE.local.md']) {
+    assert.ok(!fs.existsSync(path.join(target, file)), `${file} must not be created`);
+  }
+});
+
+// Claude Code imports "@path" resolved from the importing file's directory
+// (https://code.claude.com/docs/en/memory#import-additional-files). The installer only accepts an
+// import on a line of its own outside fenced blocks, so anything else gets the (harmless) note.
+for (const [label, file, body, noted] of [
+  ['a ../ import from .claude/CLAUDE.md', '.claude/CLAUDE.md', '@../AGENTS.md\n', false],
+  ['a CRLF import line', 'CLAUDE.md', '# Rules\r\n@AGENTS.md\r\n', false],
+  ['an import after a closed fence', 'CLAUDE.md', '```sh\nls\n```\n@AGENTS.md\n', false],
+  ['an import inside a sentence (conservative)', 'CLAUDE.md', 'see @AGENTS.md for rules\n', true],
+  ['a mention inside a code span', 'CLAUDE.md', 'example `use @AGENTS.md here`\n', true],
+  ['a mention inside a fenced block', 'CLAUDE.md', '```\n@AGENTS.md\n```\n', true],
+  ['a ~~~ line inside a backtick fence', 'CLAUDE.md', '```\n~~~\n@AGENTS.md\n```\n', true],
+  ['a shorter fence inside a four-backtick fence', 'CLAUDE.md', '````\n```\n@AGENTS.md\n````\n', true],
+  ['@AGENTS.md in .claude/CLAUDE.md, which resolves to .claude/AGENTS.md', '.claude/CLAUDE.md', '@AGENTS.md\n', true],
+  ['a lookalike name', 'CLAUDE.md', '@AGENTSXmd\n', true],
+]) {
+  test(`Claude import detection: ${label} ${noted ? 'still gets' : 'suppresses'} the note`, () => {
+    const target = freshRepo(`claude-detect-${label.replace(/\W+/g, '-')}`);
+    const claude = path.join(target, file);
+    fs.mkdirSync(path.dirname(claude), { recursive: true });
+    fs.writeFileSync(claude, body);
+    const r = install(['--owner', 'someone', target]);
+    assert.equal(r.status, 0, text(r));
+    (noted ? assert.match : assert.doesNotMatch)(r.stdout, /add a line @/);
+    assert.equal(fs.readFileSync(claude, 'utf8'), body);
+  });
+}
 
 test('an existing .claude/settings.json keeps its hooks and gains the agent-guard hook once', () => {
   const target = freshRepo('settings');
@@ -443,6 +551,7 @@ test('written files get 755 or 644 regardless of umask, and a merged settings fi
   const mode = (p) => fs.statSync(path.join(target, p)).mode & 0o777;
   assert.equal(mode('scripts/land.sh'), 0o755);
   assert.equal(mode('CONTRIBUTING.md'), 0o644);
+  assert.equal(mode('AGENTS.md'), 0o644);
   assert.equal(mode('.claude/skills/parallel-agent-workflow/SKILL.md'), 0o644);
   assert.equal(mode('.agents/skills/parallel-agent-workflow/SKILL.md'), 0o644);
   assert.equal(mode('.github/CODEOWNERS'), 0o644);
