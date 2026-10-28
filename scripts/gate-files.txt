@@ -1,0 +1,26 @@
+# Gate files: changes here alter the checks, the merge gate or the build itself.
+# land.sh and codex-review.sh both read this list from main's exact commit.
+# One bash pattern per line, matched against the repo-relative path with [[ path == pattern ]]
+# ("*" also matches "/"). A PR that edits this file is itself a gate change.
+# Extend it with your project's build and lint configuration.
+tests/*
+qa/*
+scripts/*
+.github/*
+.githooks/*
+.claude/*
+CLAUDE.md
+*/CLAUDE.md
+AGENTS.md
+*/AGENTS.md
+CONTRIBUTING.md
+package.json
+package-lock.json
+.npmrc
+.nvmrc
+.node-version
+.gitattributes
+vite.config.*
+vite.*.config.*
+postcss.config.*
+vercel.json

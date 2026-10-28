@@ -1,0 +1,9 @@
+# Paths never sent to Codex by scripts/codex-review.sh, one glob per line.
+# "dir/"            -> that directory at any depth
+# pattern with "/"  -> matched against the full repo-relative path ("*" also matches "/")
+# pattern without   -> matched against the file name or the full path
+# Add directories holding private notes, research, originals or personal data.
+*.env
+.env*
+*.pem
+*.key

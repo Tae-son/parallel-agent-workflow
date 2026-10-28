@@ -1,0 +1,16 @@
+{
+  "name": "parallel-agent-workflow",
+  "version": "0.1.0",
+  "description": "Owner-only merge gate and guardrails for repositories where several AI coding agents work in parallel",
+  "type": "module",
+  "license": "MIT",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test \"tests/*.test.mjs\"",
+    "lint": "bash -n scripts/land.sh scripts/codex-review.sh scripts/agents-status.sh install.sh .githooks/pre-push && node --check .claude/hooks/agent-guard.mjs",
+    "verify": "npm run lint && npm test"
+  }
+}

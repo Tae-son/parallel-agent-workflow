@@ -1,0 +1,9 @@
+# Risky paths: changes here make land.sh suggest --codex, and codex-review.sh sends them for
+# an advisory cross-model review (gate files and new storage/network calls are always risky).
+# Read from main's exact commit. Same format as gate-files.txt. Optional: delete the file or
+# leave it empty if nothing beyond gate files should trigger the hint.
+src/lib/*
+src/data/*
+lib/*
+*.sql
+migrations/*

@@ -1,0 +1,10 @@
+# UI paths: a PR that changes any of these needs a non-empty "Approved brief:" line in its
+# body and, at merge time, the owner must type "preview checked" after looking at a preview.
+# land.sh reads this list from main's exact commit. Same format as gate-files.txt: one bash
+# pattern per line, matched with [[ path == pattern ]] ("*" also matches "/"), "#" comments.
+# This file must exist on main. An empty list (comments only) disables the UI gate.
+src/*
+public/*
+index.html
+*.css
+*.html
