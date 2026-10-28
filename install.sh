@@ -325,9 +325,6 @@ cat <<'EOT'
   3. Commit on a branch and open a pull request. Bootstrap rule: the PR that first adds
      scripts/land.sh is reviewed and merged by the owner in GitHub's web UI; afterwards every
      merge goes through scripts/land.sh <PR#> from the primary checkout of main.
-     Arrange independent QA in a separate session, using CONTRIBUTING.md and the PR
-     template. Every PR needs an exact-head PASS report before owner acceptance; new
-     commits require retesting. Existing files kept above may need these rules merged in.
 EOT
 case $HOOKS_STATE in
   set) printf '  4. In every other clone: git config core.hooksPath .githooks\n' ;;

@@ -22,7 +22,7 @@ while several AI agents work in parallel, without reading every line of every to
    descriptor 3); stdin is closed. Piping `yes` does nothing. The PR number must be typed,
    plus `gate` when gate files changed and `preview checked` when UI files changed.
 5. **Re-check before the irreversible step.** After the owner confirms, the script re-reads
-   the PR (head, state, draft flag, base branch, CI check and raw body) and `main`, refuses if
+   the PR (head, state, draft flag, base branch and the CI check) and `main`, refuses if
    anything changed, then merges with `--match-head-commit` so GitHub also refuses a race.
 6. **Untrusted text is sanitised before it reaches the terminal.** PR titles, bodies and
    paths can carry terminal control sequences and bidirectional, zero-width or otherwise
@@ -78,36 +78,7 @@ it so that a confident agent cannot approve its own work.
   hand-merged. A dev-server port is trusted only after checking it is your own process.
 - `--force-with-lease` only on your own branch, never `--force`.
 
-## Independent QA gate
-
-Independent QA tests the outcome, not merely the diff. It is mandatory for every PR and
-separate from the optional advisory Codex opinion below. A separate session receives the
-approved brief, acceptance criteria, exact head and previous findings; the builder owns
-fixes, and QA owns the verdict. The protocol lives in `CONTRIBUTING.md` and the matching
-agent skills. No provider-specific launcher or new dependency is needed.
-
-The active report is a single fenced `independent-qa` JSON object in the PR body. Keeping it
-outside Git avoids the self-reference problem of committing evidence for a SHA that changes
-when the evidence is committed. The gate checks version/schema, exact head, distinct declared
-sessions, nonempty criterion/evidence entries, PASS results, no blockers and explicit
-limitations. It prints the report as sanitised data, never executes it, and compares the
-entire raw PR body on the final read so that neither evidence nor scope can be swapped while
-the owner reviews. There is no override for a failing or missing QA report.
-
-This validates declarations, not actual independence or complete coverage. Sessions may
-share a GitHub account; requiring different GitHub authors would exclude legitimate use
-without proving independent thought. The owner must inspect the session record and evidence.
-JSON is parsed by jq (including its duplicate-key semantics); use unique keys. The parser
-requires exact fence lines, not a general Markdown document. The owner must also check
-rendering and content, not mistake valid JSON for true observations.
-
-GitHub provides no atomic comparison of PR body with merge: edits after the last read can
-still race. `--match-head-commit` binds only code. Freeze PR-body edits during landing; use
-GitHub protection for bypass resistance. These limits are disclosed rather than described
-as an authenticated QA service. The first PR adding QA lands under the old trusted gate,
-with independent QA performed procedurally; subsequent PRs use the new gate from `main`.
-
-## Optional cross-model review
+## Cross-model review
 
 `codex-review.sh` exists because a second model with a different training set catches a
 different slice of mistakes. It is deliberately constrained:

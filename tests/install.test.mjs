@@ -63,9 +63,6 @@ test('installs every kit file into a fresh repository, byte-identical, executabl
   assert.ok(!fs.existsSync(path.join(target, 'README.md.kit')));
   assert.equal(fs.readFileSync(path.join(target, 'README.md'), 'utf8'), 'target\n', 'target README untouched');
   assert.match(r.stdout, /Bootstrap rule/);
-  assert.match(r.stdout, /independent QA/);
-  assert.match(fs.readFileSync(path.join(target, 'CONTRIBUTING.md'), 'utf8'), /## Independent QA/);
-  assert.match(fs.readFileSync(path.join(target, '.github/pull_request_template.md'), 'utf8'), /```independent-qa/);
 });
 
 test('a kept, customised skill copy that differs from the other copy is reported', () => {

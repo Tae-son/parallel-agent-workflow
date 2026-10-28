@@ -1,6 +1,6 @@
 ---
 name: parallel-agent-workflow
-description: Use for implementation, independent QA, or resuming a task ending in a verified pull request. Parallel agents work on branches and one owner merges; walks the task from brief through QA to owner acceptance. Not for general read-only questions or exploration.
+description: Use before changing any file in this repository for a task that will end in a pull request (add, fix, edit, refactor, open a PR), and when resuming or submitting such a task. Repository where parallel agents work on branches and one owner merges; walks the task from brief to pull request. Not for read-only review, questions or exploration.
 ---
 
 # Parallel agent workflow
@@ -23,7 +23,6 @@ section before step 1. Where the two ever disagree, `CONTRIBUTING.md` wins.
 - **Do:** `git log --oneline origin/main..HEAD`, `git status --short`, and
   `gh pr view --json number,state,body,headRefOid` if a pull request exists. Recover the brief
   and Allowed paths from the PR body or the owner's message.
-  Check the active QA report against the head SHA; a new commit needs fresh QA.
 - **Output:** the step to continue from.
 - **Stop if:** you cannot find the brief, the branch is not yours, or the PR is merged or
   closed.
@@ -79,26 +78,8 @@ section before step 1. Where the two ever disagree, `CONTRIBUTING.md` wins.
   `gh pr create --base main --title "<title>" --body-file <that file>`. Copy the brief into
   `Approved brief:` and the Allowed paths into `Allowed paths:`, because `scripts/land.sh`
   reads both. List any gate files you changed.
-- **Output:** the pull request URL and a BLOCKED QA placeholder, ready for step 6.
-
-## 6. Independent QA
-
-- **Inputs:** approved brief and acceptance criteria, Allowed paths, PR URL, exact head
-  commit, and prior findings. Follow `CONTRIBUTING.md` "Independent QA" for the report format.
-- **Do:** arrange a separate QA agent/session with a clean checkout of that exact commit.
-  QA inspects the full diff, runs verification, and tests criteria and failure cases without
-  editing the implementation. Supply real observations, commands and limitations in the
-  single `independent-qa` JSON block under `## Independent QA` in the PR body. Record distinct
-  builder/reviewer session IDs. Never author your own QA approval; an orchestrator may
-  transcribe the separate session's report unchanged. Read back the published body and SHA.
-- **On FAIL or BLOCKED:** the builder fixes within scope, reruns verification and pushes;
-  QA must retest the new head and replace the report. Preserve prior findings in comments or
-  linked session records. Every new commit invalidates the previous QA, including rebases.
-- **Stop if:** independent QA cannot run, required access is missing, a fix needs unapproved
-  paths, or two fix/retest rounds leave blockers. Report the blocker to the owner, not PASS.
-- **Output:** a verified PR with independent PASS evidence and honest current CI status.
-- **Then stop.** The owner accepts the evidence and runs `scripts/land.sh`; agents never
-  merge. Declared session IDs are not authentication, and green CI alone is not QA.
+- **Output:** the pull request URL, reported to the owner with the evidence.
+- **Then stop.** The owner reviews and runs `scripts/land.sh`. Your task ends at the PR.
 
 If this skill did not load on its own, invoke it by name (`/parallel-agent-workflow` in
 Claude Code).

@@ -19,7 +19,7 @@ Everything here is plain Bash and Node; there are no dependencies to install.
 | `.githooks/pre-push` | Second layer: blocks any push whose destination ref is `main`, including `other:main`. |
 | `scripts/codex-review.sh` | Optional, advisory cross-model review. Sends only risky files, only after the owner has paged the exact payload and typed `send N`, and never treats silence as approval. |
 | `.github/workflows/ci.yml` | The `CI / verify` check that the gate requires. |
-| `.github/pull_request_template.md` | The PR body fields the gate parses: `Approved brief:`, `Allowed paths:`, and the exact-commit `independent-qa` report. |
+| `.github/pull_request_template.md` | The PR body fields the gate parses: `Approved brief:` and `Allowed paths:`. |
 | `CONTRIBUTING.md` | The rules agents and owners follow. |
 | `tests/` | 230+ tests that drive the real scripts against hermetic temporary repositories with stubbed `gh` and `codex`. Nothing leaves the machine. |
 
@@ -67,27 +67,15 @@ owner writes a brief (scope + Allowed paths)
   -> agent runs scripts/agents-status.sh, checks for overlaps, stops on conflict
   -> agent pushes its branch and opens a PR using the template (never merges)
   -> CI / verify runs on the head commit
-  -> separate QA session tests the brief and records evidence on the exact head
-       FAIL/BLOCKED -> builder fixes, verifies and pushes -> QA retests the new head
   -> owner runs scripts/land.sh <PR#> in their own terminal
-       refuses unless CI green, independent QA PASS, up to date, no symlinks/submodules
+       refuses unless CI green, up to date, no symlinks/submodules
        prints: in-scope, OUT-OF-SCOPE, gate files (full diff), UI files, preview
        optional --codex: advisory second opinion, each payload approved before sending
        owner types the PR number (+ "gate", + "preview checked" when those apply)
-       re-checks head, main and the entire PR body, then squash-merges
+       re-checks head and main, then squash-merges
 ```
 
 ## Configuration
-
-Independent QA is mandatory, not the optional Codex opinion. The builder/orchestrator starts
-a separate session; this kit does not launch a model or require a particular provider. QA
-tests acceptance criteria and failure cases, records commands/observations/limitations in the
-PR body, and leaves fixes to the builder. Every new commit requires QA revalidation. Missing
-access or an untested requirement is BLOCKED. See [the report contract and fix/retest loop](CONTRIBUTING.md#independent-qa).
-
-The gate validates declared evidence, not its truth or the identity behind a shared account.
-The owner still judges independence and coverage. Existing open PRs need reports after the
-updated gate lands on `main`; update the primary checkout before using it.
 
 All lists use the same format: one bash pattern per line, matched against the repo-relative
 path with `[[ path == pattern ]]` (so `*` also matches `/`), `#` comments. `land.sh` reads

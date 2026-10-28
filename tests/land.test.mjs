@@ -49,17 +49,6 @@ const defaultBody = [
 
 // Hermetic fixture: bare origin, primary clone with land.sh on main, PR head at refs/pull/N/head,
 // and a stub `gh` first on PATH answering from fixture.json.
-function qaReport(head) {
-  return {
-    version: 1, head, builder: 'builder-session', reviewer: 'qa-session',
-    verdict: 'PASS',
-    checks: [{ criterion: 'Requested output is correct', result: 'PASS',
-      evidence: 'Inspected docs/notes.md against the brief; expected notes observed.' }],
-    blockers: [], limitations: 'Offline fixture; no live deployment tested.',
-  };
-}
-const qaBlock = (report) => `\n\n## Independent QA\n\n\`\`\`independent-qa\n${JSON.stringify(report, null, 2)}\n\`\`\`\n`;
-
 function makeFixture({
   files = { 'docs/notes.md': 'updated notes\n' },
   symlinks = {},
@@ -78,7 +67,6 @@ function makeFixture({
   originUrl,
   codexExit,
   codexOutcome,
-  qa = qaReport,
 } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'land-test-'));
   const origin = path.join(dir, 'origin.git');
@@ -131,8 +119,6 @@ function makeFixture({
     body: defaultBody, title: 'Tidy docs notes', url: `https://github.com/${REPO}/pull/${N}`,
     statusCheckRollup: rollup, ...pr,
   };
-  // Existing gate scenarios get an explicit passing QA report, unless testing its absence.
-  if (qa !== null) view.body += typeof qa === 'string' ? qa : qaBlock(qa(headSha));
   fs.writeFileSync(path.join(stub, 'fixture.json'), JSON.stringify({
     prViews: [view, { ...view, ...recheck }],
     mainShas: mainMoves ? [mainSha, 'e'.repeat(40)] : [mainSha],
@@ -192,113 +178,6 @@ function assertRefused(r, pattern) {
 }
 
 const typed = `${N}\n`;
-
-test('independent QA: refuses a missing report even with green CI', () => {
-  const r = land(makeFixture({ qa: null }), undefined, { answers: typed });
-  assertRefused(r, /independent QA/);
-});
-
-test('independent QA: prints the report and accepts PASS on the exact head', () => {
-  const fx = makeFixture();
-  const r = land(fx, undefined, { answers: typed });
-  assertMerged(r, fx);
-  assert.match(r.output, /Independent QA/);
-  assert.match(r.output, /qa-session/);
-  assert.match(r.output, /expected notes observed/);
-  assert.match(r.output, /no live deployment tested/);
-});
-
-for (const [label, change] of [
-  ['FAIL', (r) => { r.verdict = 'FAIL'; }],
-  ['BLOCKED', (r) => { r.verdict = 'BLOCKED'; }],
-  ['stale head', (r) => { r.head = 'a'.repeat(40); }],
-  ['abbreviated head', (r) => { r.head = r.head.slice(0, 7); }],
-  ['same session', (r) => { r.reviewer = r.builder; }],
-  ['builder session with trailing newline', (r) => { r.builder = `${r.reviewer}\n`; }],
-  ['reviewer session with trailing newline', (r) => { r.reviewer = `${r.builder}\n`; }],
-  ['missing reviewer', (r) => { delete r.reviewer; }],
-  ['empty reviewer', (r) => { r.reviewer = ' '; }],
-  ['missing evidence', (r) => { delete r.checks[0].evidence; }],
-  ['blank evidence', (r) => { r.checks[0].evidence = '\n\t '; }],
-  ['no checks', (r) => { r.checks = []; }],
-  ['failed check', (r) => { r.checks[0].result = 'FAIL'; }],
-  ['blocked check', (r) => { r.checks[0].result = 'BLOCKED'; }],
-  ['unresolved blocker', (r) => { r.blockers = ['Broken output']; }],
-  ['wrong blockers type', (r) => { r.blockers = ''; }],
-  ['missing limitations', (r) => { delete r.limitations; }],
-  ['unknown version', (r) => { r.version = 2; }],
-  ['unexpected field', (r) => { r.approved = true; }],
-]) {
-  test(`independent QA: refuses ${label}`, () => {
-    const fx = makeFixture({ qa: (head) => { const r = qaReport(head); change(r); return r; } });
-    assertRefused(land(fx, undefined, { answers: typed }), /independent QA/);
-  });
-}
-
-for (const [label, qa] of [
-  ['invalid JSON', '\n```independent-qa\n{bad json}\n```\n'],
-  ['unfinished block', '\n```independent-qa\n{}\n'],
-  ['duplicate reports', (head) => qaReport(head)],
-]) {
-  test(`independent QA: refuses ${label}`, () => {
-    const fx = makeFixture({ qa });
-    if (label === 'duplicate reports') {
-      const file = path.join(fx.stub, 'fixture.json');
-      const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-      for (const view of data.prViews) view.body += qaBlock(qaReport(fx.headSha));
-      fs.writeFileSync(file, JSON.stringify(data));
-    }
-    assertRefused(land(fx, undefined, { answers: typed }), /independent QA/);
-  });
-}
-
-test('independent QA: the shipped template blocks until a separate report replaces it', () => {
-  const templateBody = fs.readFileSync(path.join(root, '.github/pull_request_template.md'), 'utf8');
-  const fx = makeFixture({ qa: null, pr: { body: templateBody } });
-  assertRefused(land(fx, undefined, { answers: typed }), /independent QA/);
-  const file = path.join(fx.stub, 'fixture.json');
-  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-  for (const view of data.prViews) {
-    view.body = templateBody.replace(/```independent-qa\n[\s\S]*?\n```/, qaBlock(qaReport(fx.headSha)).trim());
-  }
-  fs.writeFileSync(file, JSON.stringify(data));
-  assertMerged(land(fx, undefined, { answers: typed }), fx);
-});
-
-test('independent QA: accepts a report with CRLF fence lines', () => {
-  const fx = makeFixture();
-  const file = path.join(fx.stub, 'fixture.json');
-  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-  for (const view of data.prViews) view.body = view.body.replaceAll('\n', '\r\n');
-  fs.writeFileSync(file, JSON.stringify(data));
-  assertMerged(land(fx, undefined, { answers: typed }), fx);
-});
-
-test('independent QA: displays hostile evidence as inert, sanitised data', () => {
-  const fx = makeFixture({ qa: (head) => ({ ...qaReport(head),
-    limitations: '$(touch should-not-exist)\u202e\u001b[2J' }) });
-  const r = land(fx, undefined, { tty: false });
-  assertRefused(r, /no terminal/);
-  assert.match(r.output, /\$\(touch should-not-exist\)\?/);
-  assert.doesNotMatch(r.output, /[\u202e\u001b]/);
-  assert.equal(fs.existsSync(path.join(fx.primary, 'should-not-exist')), false);
-});
-
-for (const [label, change] of [
-  ['withdrawn', () => defaultBody],
-  ['changed to FAIL', (body) => body.replace('"verdict": "PASS"', '"verdict": "FAIL"')],
-  ['evidence edited', (body) => body.replace('expected notes observed', 'different observation')],
-  ['scope edited', (body) => body.replace('- docs/', '- scripts/')],
-]) {
-  test(`independent QA: refuses PR body ${label} during owner review`, () => {
-    const fx = makeFixture();
-    const file = path.join(fx.stub, 'fixture.json');
-    const data = JSON.parse(fs.readFileSync(file, 'utf8'));
-    data.prViews[1].body = change(data.prViews[1].body);
-    fs.writeFileSync(file, JSON.stringify(data));
-    assertRefused(land(fx, undefined, { answers: typed }), /PR body.*changed since review/);
-  });
-}
 
 test('merges a clean in-scope PR after the PR number is typed', () => {
   const fx = makeFixture();
@@ -589,10 +468,7 @@ test('an executable-bit change is shown in the packet', () => {
   git(agent, 'push', '--quiet', '--force', 'origin', `HEAD:refs/pull/${N}/head`);
   const headSha = git(agent, 'rev-parse', 'HEAD');
   const fixture = JSON.parse(fs.readFileSync(path.join(fx.stub, 'fixture.json'), 'utf8'));
-  for (const v of fixture.prViews) {
-    v.body = v.body.replaceAll(fx.headSha, headSha);
-    v.headRefOid = headSha;
-  }
+  for (const v of fixture.prViews) v.headRefOid = headSha;
   fs.writeFileSync(path.join(fx.stub, 'fixture.json'), JSON.stringify(fixture));
   fx.headSha = headSha;
   const r = land(fx, undefined, { answers: `${N}\n` });
@@ -724,10 +600,7 @@ test('a new executable file is flagged in the packet', () => {
   git(agent, 'push', '--quiet', '--force', 'origin', `HEAD:refs/pull/${N}/head`);
   const headSha = git(agent, 'rev-parse', 'HEAD');
   const fixture = JSON.parse(fs.readFileSync(path.join(fx.stub, 'fixture.json'), 'utf8'));
-  for (const v of fixture.prViews) {
-    v.body = v.body.replaceAll(fx.headSha, headSha);
-    v.headRefOid = headSha;
-  }
+  for (const v of fixture.prViews) v.headRefOid = headSha;
   fs.writeFileSync(path.join(fx.stub, 'fixture.json'), JSON.stringify(fixture));
   fx.headSha = headSha;
   const r = land(fx, undefined, { answers: typed });
@@ -771,10 +644,7 @@ test('a submodule (gitlink) in the diff is refused', () => {
   git(agent, 'push', '--quiet', '--force', 'origin', `HEAD:refs/pull/${N}/head`);
   const headSha = git(agent, 'rev-parse', 'HEAD');
   const fixture = JSON.parse(fs.readFileSync(path.join(fx.stub, 'fixture.json'), 'utf8'));
-  for (const v of fixture.prViews) {
-    v.body = v.body.replaceAll(fx.headSha, headSha);
-    v.headRefOid = headSha;
-  }
+  for (const v of fixture.prViews) v.headRefOid = headSha;
   fs.writeFileSync(path.join(fx.stub, 'fixture.json'), JSON.stringify(fixture));
   const r = land(fx, undefined, { answers: typed });
   assertRefused(r, /symlink or submodule/);

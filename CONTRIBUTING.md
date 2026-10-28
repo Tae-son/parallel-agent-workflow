@@ -131,72 +131,7 @@ A pull request is ready to merge only when:
 4. Visible changes have been inspected, not merely compiled.
 5. Claims, figures, external links and licences have evidence.
 6. No credentials, private notes, generated dependencies or unrelated files are present.
-7. Independent QA reports PASS with evidence on the exact head commit and no blockers.
-8. The owner accepts the result.
-
-## Independent QA
-
-Every PR needs a separate QA agent/session after the builder's local verification and PR
-creation. A different model is optional; a separate session and independent testing are not.
-The builder or orchestrator arranges that session. If it cannot, report BLOCKED to the owner;
-do not silently replace it with self-review or the optional `--codex` opinion.
-
-Give QA the approved brief, acceptance criteria, Allowed paths, PR URL, exact head SHA and
-prior findings. QA reads the full diff and relevant code, derives tests from the brief rather
-than trusting the builder's summary, runs `npm run verify`, and exercises relevant behavior
-and failure cases. Visible changes need actual screen/output inspection. Use a clean checkout
-of the exact PR head, with no uncommitted implementation changes. QA is read-only with
-respect to the implementation; scratch probes and test artifacts stay outside tracked files.
-Do not run untrusted PR code with production credentials or access. Never run the owner-only
-merge/review scripts against a real repository; the kit's hermetic test fixtures are permitted.
-
-QA supplies one report using the `independent-qa` JSON block in the PR template. Put it under
-`## Independent QA` in the **PR body**, not in a commit, checkbox or unselected comment.
-The QA session may publish it, or the orchestrator may transcribe its report without changing
-the findings. Read back the published body and head SHA to verify the update. Preserve prior
-rounds in PR comments or linked session records, not extra active report blocks.
-
-Report contract (version 1, no extra keys):
-
-- `head`: the full lowercase 40-character reviewed commit SHA.
-- `builder`, `reviewer`: distinct, traceable session/task identifiers. Use only letters,
-  digits, `.`, `_`, `:`, `/`, `-`, starting with a letter or digit. These identify sessions,
-  not GitHub accounts; never invent a reviewer identity.
-- `verdict`: `PASS`, `FAIL` or `BLOCKED`.
-- `checks`: a nonempty array of objects with `criterion`, `result` and `evidence`.
-  Map every approved acceptance criterion to an observation. `result` uses the same three
-  verdicts. Evidence includes the command or manual procedure and its observed result,
-  with artifact/log links where useful. A test name or "looks good" alone is insufficient.
-- `blockers`: an array listing unresolved blocking findings, with reproduction details.
-- `limitations`: nonempty text stating untested boundaries and non-blocking risks, or an
-  explicit statement that none were identified within scope.
-- `version`: the number `1`.
-
-Only PASS with every check PASS, no blockers, and all required evidence is ready for owner
-acceptance. A demonstrated defect is FAIL; missing access, unavailable tools or an untested
-required criterion is BLOCKED. A limitation must not hide a failed or untested requirement.
-The builder fixes defects within the approved scope, reruns verification and pushes. **Every
-new commit, including a rebase or documentation fix, invalidates QA.** QA must retest the
-new head, carry forward prior findings, and replace the active report. Changed acceptance
-criteria also need owner approval and fresh QA. Stop and ask if fixes need unapproved paths;
-if two fix/retest rounds leave blockers unresolved, escalate instead of looping indefinitely.
-
-`land.sh` checks the report's structure, distinct declared sessions, exact SHA and passing
-results, and displays the evidence. It refuses missing, malformed, FAIL, BLOCKED or stale
-reports and nonempty blockers. It re-reads the entire PR body before merging and refuses any
-change during owner review, including withdrawal of QA or edits to the brief. Do not edit the
-body while the owner lands it. This is a gate check, not automatic reviewer orchestration.
-
-**Trust limit:** a shared GitHub account cannot prove which agent wrote a report. Session
-IDs and evidence are declarations, not authentication. The gate cannot judge completeness
-or truth of observations; the owner must inspect coverage and the separate session's record.
-There is no atomic GitHub condition on PR metadata: a body edit after the final read can
-still race the merge. `--match-head-commit` protects the code SHA, not the body. Web merges
-can still bypass this local gate without suitable GitHub protection.
-
-**Rollout:** existing open PRs need QA reports once this gate reaches `main`. The PR adding
-this requirement is reviewed with the current gate on `main`; obtain independent QA for it
-procedurally. After the owner merges, update the primary checkout before the next landing.
+7. The owner accepts the result.
 
 ## Merge and cleanup
 
@@ -212,13 +147,12 @@ scripts/land.sh 7            # or: scripts/land.sh --codex 7
 
 `land.sh` runs nothing from the pull request locally; the Codex review and the pattern lists
 it uses come from `main`'s exact commit, not from the working tree. It refuses unless
-GitHub's `CI / verify` check and the independent QA report pass on the exact head commit,
-the branch contains the latest `main`, and the pull request targets `main`. It also refuses
-symlink or submodule changes.
+GitHub's `CI / verify` check passed on the exact head commit, the branch contains the latest
+`main`, and the pull request targets `main`. It also refuses symlink or submodule changes.
 It prints a review packet showing paths outside the declared scope, gate-file diffs in full,
 and a preview link for UI changes. It merges only after the owner types the PR number at the
 terminal, plus `gate` or `preview checked` when those apply. Immediately before merging, it
-re-checks that neither the head nor `main` has moved and that the PR body is unchanged.
+re-checks that neither the head nor `main` has moved.
 
 Two limits matter:
 
