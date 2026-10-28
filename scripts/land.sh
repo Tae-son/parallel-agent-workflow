@@ -26,8 +26,8 @@ usage() {
 Usage: scripts/land.sh [--codex] [--repo OWNER/NAME] <PR#>
 
 Owner-only merge gate. Checks the PR against GitHub's main (CI verify green,
-up to date, no symlinks/submodules), prints a review packet and squash-merges
-only after confirmation typed on the terminal.
+independent QA PASS on the exact head, up to date, no symlinks/submodules),
+prints a review packet and squash-merges only after confirmation typed on the terminal.
 
   --codex             run scripts/codex-review.sh before confirming
   --repo OWNER/NAME   target another repository. The default is $LAND_REPO if
@@ -212,6 +212,30 @@ read_pr() {
   jq -r '.body // "" | gsub("\r"; "") | gsub("<!--[\\s\\S]*?-->"; "")' "$TMP/pr.json" >"$TMP/body"
 }
 
+
+# Read QA from the raw PR body, not the Markdown-light scope parser. Never execute it.
+check_qa() {
+  jq -e '
+    .body | select(type == "string")
+    | select(([scan("(?m)^```independent-qa\\r?$")] | length) == 1)
+    | capture("(?m)^```independent-qa\\r?\n(?<report>[\\s\\S]*?)^```\\r?$")
+    | .report | fromjson | select(type == "object")
+  ' "$TMP/pr.json" >"$TMP/qa.json" 2>/dev/null \
+    || die "missing or malformed independent QA report; see CONTRIBUTING.md"
+  jq -e --arg head "$HEAD_SHA" '
+    def text: type == "string" and test("[^\\s]");
+    def session: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:/-]*$");
+    (keys == ["blockers", "builder", "checks", "head", "limitations", "reviewer", "verdict", "version"])
+    and .version == 1 and .head == $head and .verdict == "PASS"
+    and (.builder | session) and (.reviewer | session) and .builder != .reviewer
+    and (.limitations | text)
+    and (.blockers | type == "array" and length == 0)
+    and (.checks | type == "array" and length > 0 and all(.[];
+      type == "object" and keys == ["criterion", "evidence", "result"]
+      and (.criterion | text) and (.evidence | text) and .result == "PASS"))
+  ' "$TMP/qa.json" >/dev/null 2>&1 \
+    || die "independent QA requires version 1, distinct builder/reviewer sessions, PASS with evidence for every check, no blockers, limitations and the exact head SHA"
+}
 
 check_current() {
   local behind
@@ -422,6 +446,8 @@ print_packet() {
   group 'UI:' "$TMP/ui"
   [ "$UI" = 1 ] && say "Approved brief: $(oneline <<<"$BRIEF")"
   say "$PREVIEW"
+  say 'Independent QA (reported evidence; owner must judge coverage and independence):'
+  sanitize <"$TMP/qa.json"
   say "$CODEX_RESULT"
 }
 
@@ -443,12 +469,16 @@ confirm() {
 
 recheck_and_merge() {
   local head main
-  pr_json headRefOid,state,isDraft,baseRefName,statusCheckRollup recheck.json
+  pr_json headRefOid,state,isDraft,baseRefName,statusCheckRollup,body recheck.json
   head=$(jq -r .headRefOid "$TMP/recheck.json")
   [ "$head" = "$HEAD_SHA" ] || die "PR head changed since review ($HEAD_SHA -> $(oneline <<<"$head")); re-run"
   check_pr_state "$TMP/recheck.json" ' (changed since review; re-run)'
   main=$(main_sha)
   [ "$main" = "$MAIN_SHA" ] || die "main moved since review ($MAIN_SHA -> $main); re-run"
+  # Compare the entire raw body: neither QA evidence nor the brief/scope it assessed
+  # may be replaced while the owner reads the packet. Missing body also fails closed.
+  jq -e -s '.[1].body == .[0].body' "$TMP/pr.json" "$TMP/recheck.json" >/dev/null \
+    || die "PR body (including independent QA) changed since review; re-run"
   MERGE_STARTED=1
   # The squash commit records the reviewed title and the PR URL, not whatever the PR says now.
   gh pr merge "$PR" -R "$REPO" --squash --match-head-commit "$HEAD_SHA" \
@@ -477,6 +507,7 @@ main() {
   check_current
   classify
   check_ui
+  check_qa
   run_codex
   print_packet
   confirm
