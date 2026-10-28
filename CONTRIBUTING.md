@@ -44,7 +44,16 @@ Several agents may work at once. These rules keep them from breaking each other'
 
 **The owner assigns, agents follow.** Each task starts from an owner-written brief that names
 its scope and **Allowed paths**. User-facing changes need the brief approved before any
-building starts.
+building starts. Start the brief with the skill's name, `/parallel-agent-workflow` in Claude
+Code or `$parallel-agent-workflow` in Codex, so the agent always loads the step-by-step
+procedure rather than relying on it to load by itself:
+
+```text
+/parallel-agent-workflow
+Scope: …
+Allowed paths: …
+Acceptance: …
+```
 
 **Before starting**, the agent:
 
