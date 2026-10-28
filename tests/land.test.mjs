@@ -214,6 +214,8 @@ for (const [label, change] of [
   ['stale head', (r) => { r.head = 'a'.repeat(40); }],
   ['abbreviated head', (r) => { r.head = r.head.slice(0, 7); }],
   ['same session', (r) => { r.reviewer = r.builder; }],
+  ['builder session with trailing newline', (r) => { r.builder = `${r.reviewer}\n`; }],
+  ['reviewer session with trailing newline', (r) => { r.reviewer = `${r.builder}\n`; }],
   ['missing reviewer', (r) => { delete r.reviewer; }],
   ['empty reviewer', (r) => { r.reviewer = ' '; }],
   ['missing evidence', (r) => { delete r.checks[0].evidence; }],

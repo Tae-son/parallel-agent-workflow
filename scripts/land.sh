@@ -224,7 +224,7 @@ check_qa() {
     || die "missing or malformed independent QA report; see CONTRIBUTING.md"
   jq -e --arg head "$HEAD_SHA" '
     def text: type == "string" and test("[^\\s]");
-    def session: type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:/-]*$");
+    def session: type == "string" and test("\\A[A-Za-z0-9][A-Za-z0-9._:/-]*\\z");
     (keys == ["blockers", "builder", "checks", "head", "limitations", "reviewer", "verdict", "version"])
     and .version == 1 and .head == $head and .verdict == "PASS"
     and (.builder | session) and (.reviewer | session) and .builder != .reviewer
