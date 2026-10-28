@@ -66,6 +66,7 @@ test('existing files are left alone without --force and overwritten with it', ()
   assert.equal(fs.readFileSync(gate, 'utf8'), '# customised\nsrc/build/*\n');
   assert.equal(fs.readFileSync(path.join(target, '.github/CODEOWNERS'), 'utf8'), '* @someone\n');
   assert.match(again.stdout, /Left unchanged[^\n]*\n(\s+.*\n)*\s+scripts\/gate-files\.txt/);
+  assert.match(again.stdout, /Left unchanged[^\n]*\n(\s+.*\n)*\s+\.github\/CODEOWNERS/);
   const forced = install(['--owner', 'other', '--force', target]);
   assert.equal(forced.status, 0, text(forced));
   assert.ok(fs.readFileSync(gate).equals(fs.readFileSync(path.join(root, 'scripts/gate-files.txt'))));
@@ -85,15 +86,148 @@ test('an existing .claude/settings.json keeps its hooks and gains the agent-guar
   assert.match(merged.hooks.PreToolUse[1].hooks[0].command, /agent-guard\.mjs/);
   const r = install(['--owner', 'someone', target]);
   assert.match(r.stdout, /hook already registered/);
+  assert.doesNotMatch(r.stdout, /Overwritten/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(target, '.claude/settings.json'), 'utf8')).hooks.PreToolUse.length, 2);
 });
 
-test('without --owner a placeholder CODEOWNERS is written and flagged', () => {
+test('a hook registered under a different literal is recognised and not duplicated', () => {
+  const target = freshRepo('settings-variant');
+  fs.mkdirSync(path.join(target, '.claude'));
+  const existing = { hooks: { PreToolUse: [{ matcher: 'Bash', hooks: [{ type: 'command', command: 'node ./.claude/hooks/agent-guard.mjs' }] }] } };
+  fs.writeFileSync(path.join(target, '.claude/settings.json'), JSON.stringify(existing));
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.match(r.stdout, /already registered/);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(target, '.claude/settings.json'), 'utf8')).hooks.PreToolUse.length, 1);
+});
+
+for (const [label, content] of [
+  ['hooks is a string', '{"hooks":"x"}'],
+  ['hooks is an array', '{"hooks":[]}'],
+  ['PreToolUse is an object', '{"hooks":{"PreToolUse":{}}}'],
+  ['top level is an array', '[1,2]'],
+  ['not JSON', '{nope'],
+]) {
+  test(`unsupported .claude/settings.json (${label}) is left unchanged, reported, and the run still completes`, () => {
+    const target = freshRepo(`settings-${label.replace(/\W+/g, '-')}`);
+    fs.mkdirSync(path.join(target, '.claude'));
+    fs.writeFileSync(path.join(target, '.claude/settings.json'), content);
+    const r = install(['--owner', 'someone', target]);
+    assert.equal(r.status, 0, text(r));
+    assert.equal(fs.readFileSync(path.join(target, '.claude/settings.json'), 'utf8'), content);
+    assert.match(r.stdout, /Refused[^\n]*\n(\s+.*\n)*\s+\.claude\/settings\.json \(.*register the hook by hand/);
+    assert.doesNotMatch(r.stdout, /^Updated:|hook added/m);
+    assert.equal(git(target, 'config', 'core.hooksPath'), '.githooks', 'later steps still ran');
+    assert.ok(fs.existsSync(path.join(target, 'scripts/land.sh')));
+  });
+}
+
+test('odd entries inside hooks.PreToolUse are preserved and the hook is still appended', () => {
+  const target = freshRepo('settings-odd-entries');
+  fs.mkdirSync(path.join(target, '.claude'));
+  fs.writeFileSync(path.join(target, '.claude/settings.json'), '{"hooks":{"PreToolUse":[null,{"hooks":"x"}]}}');
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 0, text(r));
+  const merged = JSON.parse(fs.readFileSync(path.join(target, '.claude/settings.json'), 'utf8'));
+  assert.deepEqual(merged.hooks.PreToolUse.slice(0, 2), [null, { hooks: 'x' }]);
+  assert.match(merged.hooks.PreToolUse[2].hooks[0].command, /agent-guard\.mjs/);
+});
+
+test('without --owner a placeholder CODEOWNERS is written, flagged on every run, and replaced by a later --owner', () => {
   const target = freshRepo('placeholder');
   const r = install([target]);
   assert.equal(r.status, 0, text(r));
   assert.equal(fs.readFileSync(path.join(target, '.github/CODEOWNERS'), 'utf8'), '* @OWNER\n');
   assert.match(r.stdout, /replace @OWNER/);
+  const again = install([target]);
+  assert.match(again.stdout, /still holds the placeholder @OWNER/);
+  const owned = install(['--owner', 'real-owner', target]);
+  assert.equal(owned.status, 0, text(owned));
+  assert.equal(fs.readFileSync(path.join(target, '.github/CODEOWNERS'), 'utf8'), '* @real-owner\n');
+  assert.match(owned.stdout, /placeholder replaced with @real-owner/);
+});
+
+test('symlinks anywhere in a destination path are refused and nothing is written through them', () => {
+  const target = freshRepo('symlinks');
+  const outside = path.join(tmp, 'outside-dir'); fs.mkdirSync(outside);
+  const outsideFile = path.join(tmp, 'outside-file.txt'); fs.writeFileSync(outsideFile, 'keep me\n');
+  fs.symlinkSync(outside, path.join(target, 'scripts'));                       // directory symlink
+  fs.mkdirSync(path.join(target, '.github'));
+  fs.symlinkSync(outsideFile, path.join(target, '.github/pull_request_template.md')); // file symlink
+  fs.symlinkSync(path.join(tmp, 'does-not-exist'), path.join(target, '.github/CODEOWNERS')); // dangling
+  const r = install(['--owner', 'someone', '--force', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.deepEqual(fs.readdirSync(outside), [], 'nothing written through the directory symlink');
+  assert.equal(fs.readFileSync(outsideFile, 'utf8'), 'keep me\n', 'file symlink target untouched');
+  assert.ok(!fs.existsSync(path.join(tmp, 'does-not-exist')), 'dangling symlink not materialised');
+  assert.match(r.stdout, /Refused[^\n]*\n(\s+.*\n)*\s+scripts\/land\.sh \(a symlink is in its path\)/);
+  assert.match(r.stdout, /\.github\/CODEOWNERS \(a symlink is in its path\)/);
+  assert.ok(fs.existsSync(path.join(target, 'CONTRIBUTING.md')), 'unaffected files still installed');
+});
+
+test('a directory where a file belongs is refused even with --force', () => {
+  const target = freshRepo('dir-at-file');
+  fs.mkdirSync(path.join(target, 'CONTRIBUTING.md'));
+  const r = install(['--owner', 'someone', '--force', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.ok(fs.statSync(path.join(target, 'CONTRIBUTING.md')).isDirectory());
+  assert.deepEqual(fs.readdirSync(path.join(target, 'CONTRIBUTING.md')), []);
+  assert.match(r.stdout, /CONTRIBUTING\.md \(exists and is not a regular file\)/);
+});
+
+test('an existing core.hooksPath other than .githooks is left alone and reported', () => {
+  const target = freshRepo('husky');
+  git(target, 'config', 'core.hooksPath', '.husky');
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.equal(git(target, 'config', 'core.hooksPath'), '.husky');
+  assert.match(r.stdout, /core\.hooksPath is '\.husky' and was left unchanged/);
+});
+
+test('an inherited GIT_DIR cannot redirect the config write to another repository', () => {
+  const other = freshRepo('other-repo');
+  const target = freshRepo('git-dir-victim');
+  const r = spawnSync(installer, ['--owner', 'someone', target], { cwd: root, env: { ...env, GIT_DIR: path.join(other, '.git') }, encoding: 'utf8' });
+  assert.equal(r.status, 0, text(r));
+  assert.equal(git(target, 'config', 'core.hooksPath'), '.githooks');
+  const cfg = spawnSync('git', ['config', 'core.hooksPath'], { cwd: other, env, encoding: 'utf8' });
+  assert.notEqual(cfg.status, 0, 'the other repository must be untouched');
+});
+
+test('a target path containing spaces works', () => {
+  const target = freshRepo('with space in name');
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.ok(fs.existsSync(path.join(target, 'scripts/land.sh')));
+  assert.equal(git(target, 'config', 'core.hooksPath'), '.githooks');
+});
+
+test('a pre-existing CI workflow is left alone and the required check name is pointed out', () => {
+  const target = freshRepo('own-ci');
+  fs.mkdirSync(path.join(target, '.github/workflows'), { recursive: true });
+  fs.writeFileSync(path.join(target, '.github/workflows/ci.yml'), 'name: Build\n');
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.equal(fs.readFileSync(path.join(target, '.github/workflows/ci.yml'), 'utf8'), 'name: Build\n');
+  assert.match(r.stdout, /ci\.yml already existed: the gate needs a check named "verify" in a workflow named "CI"/);
+});
+
+test('an incomplete kit checkout is refused before anything is written', () => {
+  const kitCopy = path.join(tmp, 'kit-copy');
+  fs.cpSync(root, kitCopy, { recursive: true, filter: (p) => !p.includes(`${path.sep}.git${path.sep}`) && !p.endsWith(`${path.sep}.git`) });
+  fs.rmSync(path.join(kitCopy, 'tests/land.test.mjs'));
+  const target = freshRepo('incomplete');
+  const r = spawnSync(path.join(kitCopy, 'install.sh'), ['--owner', 'someone', target], { cwd: root, env, encoding: 'utf8' });
+  assert.notEqual(r.status, 0);
+  assert.match(text(r), /kit file missing: tests\/land\.test\.mjs/);
+  assert.deepEqual(fs.readdirSync(target).filter((n) => n !== '.git'), ['README.md'], 'nothing written');
+});
+
+test('--help prints usage without leaking code', () => {
+  const r = install(['--help']);
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /^Usage: install\.sh/);
+  assert.doesNotMatch(r.stdout, /set -e|pipefail/);
 });
 
 test('--no-tests and --no-hooks-path are honoured', () => {
@@ -112,7 +246,12 @@ test('refuses a non-repository, a subdirectory, an invalid owner and the kit its
   const r = install([path.join(target, 'sub')]);
   assert.notEqual(r.status, 0); assert.match(text(r), /top level/);
   assert.notEqual(install(['--owner', 'bad login', target]).status, 0);
+  assert.notEqual(install(['--owner', '', target]).status, 0, 'empty --owner must be refused');
+  assert.notEqual(install(['--owner=', target]).status, 0);
+  assert.notEqual(install(['--owner', 'a'.repeat(40), target]).status, 0, 'logins are at most 39 characters');
+  assert.notEqual(install(['--bogus', target]).status, 0);
   assert.notEqual(install([root]).status, 0);
+  assert.deepEqual(fs.readdirSync(target).filter((n) => n !== '.git').sort(), ['README.md', 'sub'], 'refusals write nothing');
 });
 
 test('the installed guard tests pass inside the target repository', () => {
@@ -121,8 +260,8 @@ test('the installed guard tests pass inside the target repository', () => {
   // A nested runner must not inherit the parent runner's child-process context variables.
   const nestedEnv = { ...env };
   for (const k of Object.keys(nestedEnv)) if (k.startsWith('NODE_TEST_')) delete nestedEnv[k];
-  const r = spawnSync('node', ['--test', 'tests/agent-guard.test.mjs', 'tests/pre-push-hook.test.mjs', 'tests/agents-status.test.mjs'],
-    { cwd: target, env: nestedEnv, encoding: 'utf8', timeout: 120_000 });
+  const r = spawnSync('node', ['--test', 'tests/agent-guard.test.mjs', 'tests/pre-push-hook.test.mjs', 'tests/agents-status.test.mjs', 'tests/codex-review.test.mjs'],
+    { cwd: target, env: nestedEnv, encoding: 'utf8', timeout: 180_000 });
   assert.equal(r.status, 0, text(r));
   assert.match(r.stdout, /fail 0\b/);
   assert.match(r.stdout, /pass [1-9]\d*\b/);

@@ -23,20 +23,28 @@ Everything here is plain Bash and Node; there are no dependencies to install.
 
 ## Quick start
 
-Install into an existing repository (nothing is committed or pushed):
+Install into an existing repository:
 
 ```bash
 git clone https://github.com/Tae-son/parallel-agent-workflow.git
 parallel-agent-workflow/install.sh --owner YOUR_GITHUB_LOGIN /path/to/your/repo
 ```
 
+The installer copies files into the repository's working tree, never overwrites an existing
+file unless you pass `--force`, refuses to write through symlinks, merges the Claude hook
+into an existing `.claude/settings.json`, and sets `core.hooksPath=.githooks` in that clone
+unless another hooks path is already configured or you pass `--no-hooks-path`. It commits
+and pushes nothing. `--no-tests` skips the test files; `--help` lists the options.
+
 Then, in your repository:
 
 1. Edit `scripts/gate-files.txt`, `scripts/ui-paths.txt`, `scripts/risky-paths.txt`,
    `scripts/codex-exclude.txt` and `scripts/codex-review-contract.md` for your project.
-2. Make `npm run verify` mean "the checks that must pass before merge". CI runs
-   `npm ci && npm run verify`; the gate requires the check named `CI / verify`.
-   Include `node --test tests/*.test.mjs` so the kit keeps testing itself.
+2. Make `npm run verify` mean "the checks that must pass before merge". The installed
+   workflow runs `npm ci && npm run verify` with npm caching, so it expects a `package.json`
+   and `package-lock.json`; adapt it for pnpm, yarn or a non-Node project. The gate requires
+   the check named `CI / verify` on the exact head commit. Include
+   `node --test tests/*.test.mjs` so the kit keeps testing itself.
 3. Commit on a branch and open a pull request. **Bootstrap rule:** the PR that first adds
    `scripts/land.sh` is reviewed and merged by the owner in GitHub's web UI. From then on
    every merge goes through `scripts/land.sh <PR#>` from the primary checkout of `main`.
