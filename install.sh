@@ -10,8 +10,9 @@ usage() {
   cat <<'EOT'
 Usage: install.sh [--owner GITHUB_LOGIN] [--force] [--no-tests] [--no-hooks-path] [--] TARGET_DIR
 
-Copies the merge gate, guard hooks, CI workflow, PR template, CONTRIBUTING and the kit's
-tests into TARGET_DIR, which must be the top level of a Git repository.
+Copies the merge gate, guard hooks, CI workflow, PR template, CONTRIBUTING, the agent
+workflow skill (for Claude Code in .claude/skills/ and for Codex in .agents/skills/) and the
+kit's tests into TARGET_DIR, which must be the top level of a Git repository.
 
   --owner LOGIN     write .github/CODEOWNERS as "* @LOGIN" (otherwise a placeholder)
   --force           overwrite existing regular files (symlinks, hard links to other files,
@@ -73,10 +74,13 @@ FILES=(
   .github/pull_request_template.md
   .github/workflows/ci.yml
   .claude/hooks/agent-guard.mjs
+  .claude/skills/parallel-agent-workflow/SKILL.md
+  .agents/skills/parallel-agent-workflow/SKILL.md
   CONTRIBUTING.md
 )
 TEST_FILES=(
   tests/agent-guard.test.mjs
+  tests/agent-skill.test.mjs
   tests/agents-status.test.mjs
   tests/codex-review.test.mjs
   tests/land.test.mjs
@@ -145,6 +149,11 @@ put() { # relative path, source file
   if [ -e "$dst" ]; then write_file "$rel" "$src" force; else write_file "$rel" "$src" add; fi
 }
 for f in "${FILES[@]}"; do put "$f" "$KIT/$f"; done
+# Claude Code reads .claude/skills/ and Codex reads .agents/skills/; the two copies must match.
+sk=skills/parallel-agent-workflow/SKILL.md
+if [ -f "$TARGET/.claude/$sk" ] && [ -f "$TARGET/.agents/$sk" ] && ! cmp -s -- "$TARGET/.claude/$sk" "$TARGET/.agents/$sk"; then
+  notes+=(".claude/$sk and .agents/$sk differ (an existing copy was kept); Claude Code and Codex will follow different instructions until you make them identical")
+fi
 # CI_STATE: installed (written now), kept (an existing file was left alone) or refused.
 CI_STATE=refused
 if [[ " ${added[*]-} ${overwritten[*]-} " == *' .github/workflows/ci.yml '* ]]; then CI_STATE=installed

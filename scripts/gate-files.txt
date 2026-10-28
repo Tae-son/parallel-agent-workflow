@@ -9,6 +9,7 @@ scripts/*
 .github/*
 .githooks/*
 .claude/*
+.agents/*
 CLAUDE.md
 */CLAUDE.md
 AGENTS.md

@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Agent skill `parallel-agent-workflow`: walks an assigned task through resume, brief,
+  preflight, build, verify and pull request, with explicit stop-and-ask conditions, and
+  points to `CONTRIBUTING.md` instead of restating it. Installed for Claude Code in
+  `.claude/skills/` and, as a byte-identical copy, for Codex in `.agents/skills/` (no
+  symlink, because `land.sh` refuses symlinks). `.agents/*` is now a gate file. `install.sh`
+  notes when a kept copy leaves the two out of sync, and installs `tests/agent-skill.test.mjs`,
+  which checks that they match.
+
 ## 0.1.0 (2026-10-28)
 
 First standalone release, extracted from a private project where it had been running as the

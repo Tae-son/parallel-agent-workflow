@@ -37,7 +37,8 @@ const EXPECTED = [
   'scripts/ui-paths.txt', 'scripts/risky-paths.txt', 'scripts/codex-exclude.txt', 'scripts/codex-review-contract.md',
   '.githooks/pre-push', '.github/pull_request_template.md', '.github/workflows/ci.yml', '.github/CODEOWNERS',
   '.claude/hooks/agent-guard.mjs', '.claude/settings.json', 'CONTRIBUTING.md',
-  'tests/agent-guard.test.mjs', 'tests/agents-status.test.mjs', 'tests/codex-review.test.mjs',
+  '.claude/skills/parallel-agent-workflow/SKILL.md', '.agents/skills/parallel-agent-workflow/SKILL.md',
+  'tests/agent-guard.test.mjs', 'tests/agent-skill.test.mjs', 'tests/agents-status.test.mjs', 'tests/codex-review.test.mjs',
   'tests/land.test.mjs', 'tests/pre-push-hook.test.mjs', 'tests/helpers/land-gh-stub.mjs',
 ];
 
@@ -52,6 +53,10 @@ test('installs every kit file into a fresh repository, byte-identical, executabl
   for (const f of ['scripts/land.sh', 'scripts/codex-review.sh', 'scripts/agents-status.sh', '.githooks/pre-push', '.claude/hooks/agent-guard.mjs']) {
     assert.ok(fs.statSync(path.join(target, f)).mode & 0o100, `${f} not executable`);
   }
+  for (const f of EXPECTED.filter((f) => f.endsWith('/SKILL.md'))) {
+    assert.ok(fs.lstatSync(path.join(target, f)).isFile(), `${f} must be a regular file, not a symlink`);
+    assert.equal(fs.statSync(path.join(target, f)).mode & 0o777, 0o644, `${f} must not be executable`);
+  }
   assert.equal(fs.readFileSync(path.join(target, '.github/CODEOWNERS'), 'utf8'), '* @someone\n');
   assert.equal(git(target, 'config', 'core.hooksPath'), '.githooks');
   assert.ok(!fs.existsSync(path.join(target, 'install.sh')), 'the installer must not copy itself');
@@ -60,20 +65,39 @@ test('installs every kit file into a fresh repository, byte-identical, executabl
   assert.match(r.stdout, /Bootstrap rule/);
 });
 
+test('a kept, customised skill copy that differs from the other copy is reported', () => {
+  const target = freshRepo('skill-drift');
+  const skill = path.join(target, '.claude/skills/parallel-agent-workflow/SKILL.md');
+  fs.mkdirSync(path.dirname(skill), { recursive: true });
+  fs.writeFileSync(skill, '# Customised workflow\n');
+  const r = install(['--owner', 'someone', '--no-tests', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.equal(fs.readFileSync(skill, 'utf8'), '# Customised workflow\n');
+  assert.match(r.stdout, /Notes:[^\n]*\n(\s+.*\n)*\s+\.claude\/skills\/parallel-agent-workflow\/SKILL\.md and \.agents\/skills\/parallel-agent-workflow\/SKILL\.md differ/);
+  const clean = freshRepo('skill-same');
+  assert.doesNotMatch(install(['--owner', 'someone', '--no-tests', clean]).stdout, /differ \(an existing copy was kept\)/);
+});
+
 test('existing files are left alone without --force and overwritten with it', () => {
   const target = freshRepo('existing');
   assert.equal(install(['--owner', 'someone', target]).status, 0);
   const gate = path.join(target, 'scripts/gate-files.txt');
   fs.writeFileSync(gate, '# customised\nsrc/build/*\n');
+  const skill = path.join(target, '.claude/skills/parallel-agent-workflow/SKILL.md');
+  fs.mkdirSync(path.dirname(skill), { recursive: true });
+  fs.writeFileSync(skill, '# Customised workflow\nKeep my project rules.\n');
   const again = install(['--owner', 'other', target]);
   assert.equal(again.status, 0, text(again));
   assert.equal(fs.readFileSync(gate, 'utf8'), '# customised\nsrc/build/*\n');
+  assert.equal(fs.readFileSync(skill, 'utf8'), '# Customised workflow\nKeep my project rules.\n');
   assert.equal(fs.readFileSync(path.join(target, '.github/CODEOWNERS'), 'utf8'), '* @someone\n');
   assert.match(again.stdout, /Left unchanged[^\n]*\n(\s+.*\n)*\s+scripts\/gate-files\.txt/);
+  assert.match(again.stdout, /Left unchanged[^\n]*\n(\s+.*\n)*\s+\.claude\/skills\/parallel-agent-workflow\/SKILL\.md/);
   assert.match(again.stdout, /Left unchanged[^\n]*\n(\s+.*\n)*\s+\.github\/CODEOWNERS/);
   const forced = install(['--owner', 'other', '--force', target]);
   assert.equal(forced.status, 0, text(forced));
   assert.ok(fs.readFileSync(gate).equals(fs.readFileSync(path.join(root, 'scripts/gate-files.txt'))));
+  assert.ok(fs.readFileSync(skill).equals(fs.readFileSync(path.join(root, '.claude/skills/parallel-agent-workflow/SKILL.md'))));
   assert.equal(fs.readFileSync(path.join(target, '.github/CODEOWNERS'), 'utf8'), '* @other\n');
 });
 
@@ -419,6 +443,8 @@ test('written files get 755 or 644 regardless of umask, and a merged settings fi
   const mode = (p) => fs.statSync(path.join(target, p)).mode & 0o777;
   assert.equal(mode('scripts/land.sh'), 0o755);
   assert.equal(mode('CONTRIBUTING.md'), 0o644);
+  assert.equal(mode('.claude/skills/parallel-agent-workflow/SKILL.md'), 0o644);
+  assert.equal(mode('.agents/skills/parallel-agent-workflow/SKILL.md'), 0o644);
   assert.equal(mode('.github/CODEOWNERS'), 0o644);
   assert.equal(mode('.claude/settings.json'), 0o600);
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(target, '.claude/settings.json'), 'utf8')).env, { SECRET: 'x' });

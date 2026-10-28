@@ -287,6 +287,18 @@ test('gate-file changes print the full diff and need a typed "gate"', () => {
   assertMerged(land(fx, undefined, { answers: `${N}\ngate\n` }), fx);
 });
 
+test('an .agents skill-only change is a gate file and needs typed "gate" confirmation', () => {
+  // The default fixture copies the real kit list into main; do not inline a pattern here.
+  const files = { '.agents/skills/parallel-agent-workflow/SKILL.md': '# AGENT-SKILL-GATE-MARKER\n' };
+  const refused = land(makeFixture({ files }), undefined, { answers: typed });
+  assertRefused(refused, /Gate files changed\. Type 'gate'/);
+  assert.match(refused.output, /Gate files:\s+A\s+\.agents\/skills\/parallel-agent-workflow\/SKILL\.md/);
+  assert.match(refused.output, /\+# AGENT-SKILL-GATE-MARKER/);
+
+  const fx = makeFixture({ files });
+  assertMerged(land(fx, undefined, { answers: `${N}\ngate\n` }), fx);
+});
+
 const uiBody = 'Approved brief: owner brief 2026-10-20\n\nAllowed paths:\n- src/\n';
 
 test('UI changes show the exact-commit preview and need "preview checked"', () => {
