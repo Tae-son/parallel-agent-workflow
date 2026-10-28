@@ -34,7 +34,9 @@ The installer copies files into the repository's working tree, never overwrites 
 file unless you pass `--force`, refuses to write through symlinks, merges the Claude hook
 into an existing `.claude/settings.json`, and sets `core.hooksPath=.githooks` in that clone
 unless another hooks path is already configured or you pass `--no-hooks-path`. It commits
-and pushes nothing. `--no-tests` skips the test files; `--help` lists the options.
+and pushes nothing. `--no-tests` skips the test files; `--help` lists the options. It exits
+with status 2 when it finished but had to refuse some paths, so scripts can notice a
+partial install; the report lists every path it added, updated, skipped or refused.
 
 Then, in your repository:
 

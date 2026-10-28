@@ -1,8 +1,9 @@
+import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 
-const root = new URL('..', import.meta.url).pathname;
+const root = fileURLToPath(new URL('..', import.meta.url));
 const hook = `${root}.githooks/pre-push`;
 const localSha = '1111111111111111111111111111111111111111';
 const remoteSha = '2222222222222222222222222222222222222222';

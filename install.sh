@@ -2,30 +2,33 @@
 # install.sh: copy the parallel-agent workflow kit into another Git repository.
 # Run with --help for usage. Nothing is committed or pushed.
 set -euo pipefail
-# Never let an inherited git environment (hooks, tools) redirect config writes elsewhere.
-unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR
+# Never let an inherited git or shell environment redirect reads, writes or `cd`.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_COMMON_DIR GIT_CONFIG GIT_CONFIG_PARAMETERS GIT_CONFIG_COUNT CDPATH
 
 usage() {
   cat <<'EOT'
-Usage: install.sh [--owner GITHUB_LOGIN] [--force] [--no-tests] [--no-hooks-path] TARGET_DIR
+Usage: install.sh [--owner GITHUB_LOGIN] [--force] [--no-tests] [--no-hooks-path] [--] TARGET_DIR
 
 Copies the merge gate, guard hooks, CI workflow, PR template, CONTRIBUTING and the kit's
 tests into TARGET_DIR, which must be the top level of a Git repository.
 
   --owner LOGIN     write .github/CODEOWNERS as "* @LOGIN" (otherwise a placeholder)
-  --force           overwrite existing regular files (symlinks and directories are never touched)
+  --force           overwrite existing regular files (symlinks, hard links to other files,
+                    directories and nested repositories are never touched)
   --no-tests        do not copy tests/
   --no-hooks-path   do not set core.hooksPath=.githooks in the target
   -h, --help        show this help
 
 Existing files are left alone unless --force. .claude/settings.json is merged so the
-agent-guard hook is registered without dropping existing hooks. An existing core.hooksPath
-other than .githooks is left alone and reported. Nothing is committed or pushed.
+agent-guard hook is registered without dropping existing hooks. core.hooksPath is set in the
+clone's local config only when it is not already set there. Exit status: 0 when everything
+requested was done, 1 when nothing was written because of a refused argument or state,
+2 when the run completed but some paths were refused (see the report).
 EOT
 }
 die() { printf 'install.sh: %s\n' "$*" >&2; exit 1; }
 
-KIT=$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")" && pwd -P)
+KIT=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")" && pwd -P)
 OWNER='' OWNER_SET=0 FORCE=0 TESTS=1 HOOKS_PATH=1 TARGET=''
 while [ $# -gt 0 ]; do
   case $1 in
@@ -35,21 +38,21 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1 ;;
     --no-tests) TESTS=0 ;;
     --no-hooks-path) HOOKS_PATH=0 ;;
-    --) shift; [ $# -eq 1 ] || die "exactly one TARGET_DIR is required"; TARGET=$1 ;;
+    --) shift; while [ $# -gt 0 ]; do [ -z "$TARGET" ] || die "only one TARGET_DIR allowed"; TARGET=$1; shift; done; break ;;
     -*) die "unknown option: $1 (see --help)" ;;
     *) [ -z "$TARGET" ] || die "only one TARGET_DIR allowed"; TARGET=$1 ;;
   esac
   shift
 done
 
-# ---- Pre-flight: everything that can refuse does so before any write. ----
+# ---- Pre-flight: everything that can refuse the whole run does so before any write. ----
 [ -n "$TARGET" ] || { usage >&2; die "TARGET_DIR is required"; }
 command -v git >/dev/null 2>&1 || die "git is required"
 command -v node >/dev/null 2>&1 || die "node (20 or newer) is required"
 [ -d "$TARGET" ] || die "not a directory: $TARGET"
-TARGET=$(cd "$TARGET" && pwd -P)
+TARGET=$(cd -- "$TARGET" && pwd -P)
 top=$(git -C "$TARGET" rev-parse --show-toplevel 2>/dev/null) || die "$TARGET is not inside a Git repository"
-[ "$(readlink -f "$top")" = "$TARGET" ] || die "run against the repository top level: $top"
+[ "$(readlink -f -- "$top")" = "$TARGET" ] || die "run against the repository top level: $top"
 [ "$TARGET" != "$KIT" ] || die "TARGET_DIR is the kit itself"
 if (( OWNER_SET )); then
   OWNER=${OWNER#@}
@@ -85,7 +88,7 @@ for f in "${FILES[@]}" .claude/settings.json; do
   [ -f "$KIT/$f" ] || die "kit file missing: $f (incomplete checkout of the kit at $KIT)"
 done
 
-# ---- Report: printed on every exit, so an abort still shows what was written. ----
+# ---- Report: printed on every exit, so an abort still shows what was actually written. ----
 added=() updated=() overwritten=() skipped=() refused=() notes=()
 report() { local label=$1; shift; [ $# -gt 0 ] || return 0; printf '%s\n' "$label"; printf '  %s\n' "$@"; }
 finish() {
@@ -96,62 +99,84 @@ finish() {
   report 'Left unchanged (exists; use --force to overwrite):' "${skipped[@]+"${skipped[@]}"}"
   report 'Refused (never touched):' "${refused[@]+"${refused[@]}"}"
   report 'Notes:' "${notes[@]+"${notes[@]}"}"
-  if [ "$rc" -ne 0 ]; then printf 'install.sh aborted (exit %s); the lists above show what was already written.\n' "$rc" >&2; fi
+  if [ "$rc" -ne 0 ]; then printf 'install.sh aborted (exit %s); the lists above show what was actually written.\n' "$rc" >&2; fi
 }
 trap finish EXIT
 
-# A relative path is safe to write only if no existing component of it is a symlink;
-# otherwise a copy could land outside the repository.
-path_ok() {
-  local acc=$TARGET IFS=/ comp
-  for comp in $1; do
+# A relative path may be written only if no existing component is a symlink, no intermediate
+# component is a non-directory, no intermediate directory is another repository, and an existing
+# leaf is a regular file with a single hard link. Prints the reason when it refuses.
+path_problem() {
+  local acc=$TARGET rel=$1 IFS=/ comp leaf
+  leaf=${rel##*/}
+  for comp in $rel; do
     acc=$acc/$comp
-    [ -L "$acc" ] && return 1
+    [ -L "$acc" ] && { printf 'a symlink is in its path'; return; }
+    if [ "$comp" != "$leaf" ] && [ -e "$acc" ]; then
+      [ -d "$acc" ] || { printf 'a non-directory is in its path'; return; }
+      [ -e "$acc/.git" ] && { printf 'a nested repository is in its path'; return; }
+    fi
   done
-  return 0
+  if [ -e "$acc" ]; then
+    [ -f "$acc" ] || { printf 'exists and is not a regular file'; return; }
+    [ "$(stat -c %h -- "$acc")" = 1 ] || { printf 'is a hard link to another file'; return; }
+  fi
 }
 is_exec() { local e; for e in "${EXEC[@]}"; do [ "$e" = "$1" ] && return 0; done; return 1; }
 
+# Write $2 (a file) to relative path $1 atomically; records the outcome. $3 = mode (add|force).
+write_file() {
+  local rel=$1 src=$2 dst="$TARGET/$1" tmp
+  if ! mkdir -p -- "$(dirname -- "$dst")" 2>/dev/null; then refused+=("$rel (cannot create its directory)"); return; fi
+  tmp=$(mktemp -- "$dst.XXXXXX" 2>/dev/null) || { refused+=("$rel (directory not writable)"); return; }
+  if ! cp -- "$src" "$tmp" 2>/dev/null; then rm -f -- "$tmp"; refused+=("$rel (copy failed)"); return; fi
+  if is_exec "$rel"; then chmod +x -- "$tmp"; else chmod 644 -- "$tmp"; fi
+  if ! mv -f -- "$tmp" "$dst" 2>/dev/null; then rm -f -- "$tmp"; refused+=("$rel (cannot replace it)"); return; fi
+  if [ "$3" = force ]; then overwritten+=("$rel"); else added+=("$rel"); fi
+}
+
 put() { # relative path, source file
-  local rel=$1 src=$2 dst="$TARGET/$1"
-  if ! path_ok "$rel"; then refused+=("$rel (a symlink is in its path)"); return; fi
-  if [ -e "$dst" ] && [ ! -f "$dst" ]; then refused+=("$rel (exists and is not a regular file)"); return; fi
+  local rel=$1 src=$2 dst="$TARGET/$1" why
+  why=$(path_problem "$rel"); if [ -n "$why" ]; then refused+=("$rel ($why)"); return; fi
   if [ -e "$dst" ] && (( ! FORCE )); then skipped+=("$rel"); return; fi
-  if [ -e "$dst" ]; then overwritten+=("$rel"); else added+=("$rel"); fi
-  mkdir -p "$(dirname "$dst")"
-  cp "$src" "$dst"
-  if is_exec "$rel"; then chmod +x "$dst"; fi
+  if [ -e "$dst" ]; then write_file "$rel" "$src" force; else write_file "$rel" "$src" add; fi
 }
 for f in "${FILES[@]}"; do put "$f" "$KIT/$f"; done
+CI_SKIPPED=0
 if [ -e "$TARGET/.github/workflows/ci.yml" ] && ! [[ " ${added[*]-} ${overwritten[*]-} " == *' .github/workflows/ci.yml '* ]]; then
-  notes+=('.github/workflows/ci.yml already existed: the gate needs a check named "verify" in a workflow named "CI"; add that job to your workflow or install the kit'"'"'s with --force')
+  CI_SKIPPED=1
+  notes+=('.github/workflows/ci.yml already existed: the gate needs a check named "verify" in a workflow named "CI"; add that job to your workflow or copy the kit'"'"'s .github/workflows/ci.yml by hand')
 fi
 
-# ---- CODEOWNERS ----
+# ---- CODEOWNERS (GitHub reads .github/, then the root, then docs/) ----
 PLACEHOLDER='* @OWNER'
 co_rel=.github/CODEOWNERS co=$TARGET/.github/CODEOWNERS
-if ! path_ok "$co_rel"; then refused+=("$co_rel (a symlink is in its path)")
-elif [ -e "$co" ] && [ ! -f "$co" ]; then refused+=("$co_rel (exists and is not a regular file)")
+normalized_co() { tr -d '\r' <"$co" | sed -e '/^[[:space:]]*#/d' -e '/^[[:space:]]*$/d' -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//'; }
+write_co() { local tmp; tmp=$(mktemp -- "$co.XXXXXX") && printf '%s\n' "$1" >"$tmp" && mv -f -- "$tmp" "$co"; }
+why=$(path_problem "$co_rel")
+if [ -n "$why" ]; then refused+=("$co_rel ($why)")
+elif [ ! -e "$co" ] && { [ -e "$TARGET/CODEOWNERS" ] || [ -e "$TARGET/docs/CODEOWNERS" ]; }; then
+  notes+=("$co_rel not created: CODEOWNERS already exists at the repository root or in docs/ and .github/ would shadow it")
 else
-  existing=''; [ -e "$co" ] && existing=$(<"$co")
+  is_placeholder=0; [ -e "$co" ] && [ "$(normalized_co)" = "$PLACEHOLDER" ] && is_placeholder=1
   if (( OWNER_SET )); then
-    if [ ! -e "$co" ]; then mkdir -p "$(dirname "$co")"; printf '* @%s\n' "$OWNER" >"$co"; added+=("$co_rel")
-    elif [ "$existing" = "$PLACEHOLDER" ]; then printf '* @%s\n' "$OWNER" >"$co"; updated+=("$co_rel (placeholder replaced with @$OWNER)")
-    elif (( FORCE )); then printf '* @%s\n' "$OWNER" >"$co"; overwritten+=("$co_rel")
+    if [ ! -e "$co" ]; then mkdir -p -- "$(dirname -- "$co")"; write_co "* @$OWNER"; added+=("$co_rel")
+    elif (( is_placeholder )); then write_co "* @$OWNER"; updated+=("$co_rel (placeholder replaced with @$OWNER)")
+    elif (( FORCE )); then write_co "* @$OWNER"; overwritten+=("$co_rel")
     else skipped+=("$co_rel"); fi
   else
-    if [ ! -e "$co" ]; then mkdir -p "$(dirname "$co")"; printf '%s\n' "$PLACEHOLDER" >"$co"; added+=("$co_rel (placeholder: replace @OWNER with the owner's GitHub login)")
-    elif [ "$existing" = "$PLACEHOLDER" ]; then notes+=("$co_rel still holds the placeholder @OWNER; re-run with --owner LOGIN or edit it")
+    if [ ! -e "$co" ]; then mkdir -p -- "$(dirname -- "$co")"; write_co "$PLACEHOLDER"; added+=("$co_rel (placeholder: replace @OWNER with the owner's GitHub login)")
+    elif (( is_placeholder )); then notes+=("$co_rel still holds the placeholder @OWNER; re-run with --owner LOGIN or edit it")
     else skipped+=("$co_rel"); fi
   fi
 fi
 
 # ---- .claude/settings.json: create, or merge the agent-guard hook into an existing object. ----
 st_rel=.claude/settings.json settings=$TARGET/.claude/settings.json
-if ! path_ok "$st_rel"; then refused+=("$st_rel (a symlink is in its path)")
-elif [ -e "$settings" ] && [ ! -f "$settings" ]; then refused+=("$st_rel (exists and is not a regular file)")
-elif [ ! -e "$settings" ]; then
-  mkdir -p "$(dirname "$settings")"; cp "$KIT/.claude/settings.json" "$settings"; added+=("$st_rel")
+why=$(path_problem "$st_rel")
+if [ -n "$why" ]; then refused+=("$st_rel ($why)")
+elif [ ! -e "$settings" ] || [ ! -s "$settings" ]; then
+  write_file "$st_rel" "$KIT/.claude/settings.json" add
 else
   merged=$(node - "$settings" <<'JS' || echo error
 const fs = require('node:fs');
@@ -170,41 +195,71 @@ try {
   s.hooks ??= {};
   s.hooks.PreToolUse ??= [];
   s.hooks.PreToolUse.push({ matcher: 'Bash', hooks: [{ type: 'command', command: cmd }] });
-  fs.writeFileSync(file, `${JSON.stringify(s, null, 2)}\n`);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(s, null, 2)}\n`);
+  fs.renameSync(tmp, file);
   console.log('merged');
 } catch (e) { console.log(`unsupported: ${e.message}`); }
 JS
 )
   case $merged in
-    merged) updated+=("$st_rel (agent-guard PreToolUse hook added)") ;;
+    merged) updated+=("$st_rel (agent-guard PreToolUse hook added; file re-indented with two spaces)") ;;
     present) skipped+=("$st_rel (agent-guard hook already registered)") ;;
     *) refused+=("$st_rel (${merged#unsupported: }; register the hook by hand, see .claude/settings.json in the kit)") ;;
   esac
 fi
 
-# ---- core.hooksPath ----
+# ---- core.hooksPath: local config only. ----
+HOOKS_STATE=skipped
 if (( HOOKS_PATH )); then
-  current=$(git -C "$TARGET" config --get core.hooksPath || true)
-  if [ -z "$current" ]; then git -C "$TARGET" config core.hooksPath .githooks; notes+=('set core.hooksPath=.githooks in this clone')
-  elif [ "$current" = .githooks ]; then notes+=('core.hooksPath is already .githooks')
-  else notes+=("core.hooksPath is '$current' and was left unchanged; chain .githooks/pre-push from your hook manager, or set core.hooksPath=.githooks to use the kit's hook")
+  mapfile -t current < <(git -C "$TARGET" config --local --get-all core.hooksPath 2>/dev/null || true)
+  hooks_dir=$(git -C "$TARGET" rev-parse --path-format=absolute --git-path hooks)
+  if [ ${#current[@]} -gt 1 ]; then
+    HOOKS_STATE=other; notes+=("core.hooksPath has several local values (${current[*]}) and was left unchanged")
+  elif [ ${#current[@]} -eq 0 ]; then
+    global=$(git -C "$TARGET" config --get core.hooksPath 2>/dev/null || true)   # non-local scopes only, read before setting
+    git -C "$TARGET" config --local core.hooksPath .githooks; HOOKS_STATE=set
+    notes+=('set core.hooksPath=.githooks in this clone (local config)')
+    live=$(find "$hooks_dir" -maxdepth 1 -type f -perm -u+x ! -name '*.sample' 2>/dev/null | sort | tr '\n' ' ' || true)
+    if [ -n "$live" ]; then notes+=("existing hooks in $hooks_dir are no longer run now that core.hooksPath is set: ${live% }; move them into .githooks/ to keep them"); fi
+    if [ -n "$global" ] && [ "$global" != .githooks ]; then notes+=("a non-local core.hooksPath ($global) exists; the local value takes precedence in this clone"); fi
+  elif [ "${current[0]}" = .githooks ]; then HOOKS_STATE=set; notes+=('core.hooksPath is already .githooks')
+  else HOOKS_STATE=other; notes+=("core.hooksPath is '${current[0]}' and was left unchanged; chain .githooks/pre-push from your hook manager, or set core.hooksPath=.githooks to use the kit's hook")
   fi
 fi
 
 trap - EXIT
 finish
-cat <<EOT
-
-Next steps in $TARGET:
+printf '\nNext steps in %s:\n' "$TARGET"
+cat <<'EOT'
   1. Review scripts/gate-files.txt, scripts/ui-paths.txt, scripts/risky-paths.txt,
      scripts/codex-exclude.txt and scripts/codex-review-contract.md for this project.
+EOT
+if (( CI_SKIPPED )); then
+  cat <<'EOT'
+  2. Your existing .github/workflows/ci.yml was kept. The gate requires a check named
+     "verify" in a workflow named "CI" to be green on the exact head commit; add that job
+     (see the kit's .github/workflows/ci.yml) and make "npm run verify" mean "the checks
+     that must pass before merge".
+EOT
+else
+  cat <<'EOT'
   2. Make "npm run verify" exist and mean "the checks that must pass before merge".
      The installed CI workflow runs "npm ci && npm run verify" with actions/setup-node's npm
      cache, so it needs a package.json and package-lock.json; adapt it for pnpm, yarn or a
      non-Node project. The gate requires the check "CI / verify" to be green on the exact
-     head commit.$( (( TESTS )) && printf '\n     Include "node --test tests/*.test.mjs" in verify so the kit keeps testing itself.')
+     head commit.
+EOT
+fi
+(( TESTS )) && printf '     Include "node --test tests/*.test.mjs" in verify so the kit keeps testing itself.\n'
+cat <<'EOT'
   3. Commit on a branch and open a pull request. Bootstrap rule: the PR that first adds
      scripts/land.sh is reviewed and merged by the owner in GitHub's web UI; afterwards every
      merge goes through scripts/land.sh <PR#> from the primary checkout of main.
-  4. In every clone: git config core.hooksPath .githooks
 EOT
+case $HOOKS_STATE in
+  set) printf '  4. In every other clone: git config core.hooksPath .githooks\n' ;;
+  other) printf '  4. Hooks: core.hooksPath was left as it is; wire .githooks/pre-push into your hook manager.\n' ;;
+  skipped) printf '  4. In every clone (including this one): git config core.hooksPath .githooks\n' ;;
+esac
+[ ${#refused[@]} -eq 0 ] || exit 2

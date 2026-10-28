@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
@@ -9,7 +10,7 @@ import path from 'node:path';
 // The owner's /dev/tty is simulated with util-linux `script`, fed answers on stdin.
 // No real Codex is ever invoked and nothing leaves the machine.
 
-const root = new URL('..', import.meta.url).pathname;
+const root = fileURLToPath(new URL('..', import.meta.url));
 // land.sh runs main's copies from a temp dir, so each test runs a copy with its siblings.
 const SIBLINGS = ['codex-review.sh', 'codex-exclude.txt', 'codex-review-contract.md', 'gate-files.txt', 'risky-paths.txt'];
 const safeguards = fs.readFileSync(path.join(root, 'scripts/codex-review-contract.md'), 'utf8');
