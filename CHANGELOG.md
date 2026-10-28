@@ -40,3 +40,17 @@ installer refuses symlinks, hard links, non-regular files and nested repositorie
 atomically and records only successful writes, never changes an existing local
 `core.hooksPath`, ignores inherited `GIT_CONFIG` and `CDPATH`, merges or refuses malformed
 `.claude/settings.json` without aborting, and exits 2 after a partial install.
+
+Third review round: `land.sh` runs git with `--no-replace-objects` and refuses when the
+repository-level config sets keys that could alter fetches or run commands (`insteadOf`,
+`uploadpack`, `fsmonitor`, credential helpers and similar), because linked worktrees share
+that config with agents; a pattern ending in `/` is a directory prefix in every list; a
+byte-order mark no longer disables the first pattern; new executables are flagged; the
+squash commit uses the reviewed title and the PR URL; the brief check accepts non-Latin
+scripts; `--repo` differing only in case is the same repository. `install.sh` treats a
+hooks path reached through includes or worktree config as repository-level, refuses
+uninitialised submodule paths, limits logins to 39 ASCII characters, does not set
+`core.hooksPath` when its own hook could not be installed, mentions symlinked hooks, sets
+explicit file modes and keeps the mode of a merged settings file, keeps warning while a
+placeholder line remains, handles whitespace-only or BOM-prefixed settings files, and
+turns a failed CODEOWNERS or config write into a refusal instead of an abort.

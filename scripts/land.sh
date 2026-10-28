@@ -40,19 +40,24 @@ EOF
 die() { printf 'REFUSED: %s\n' "$*" >&2; exit 1; }
 say() { printf '%s\n' "$*"; }
 # Every git call ignores hooks from the checkout (a PR branch tried out in the primary worktree
-# must not get code executed with the owner's credentials) and submodule-ignoring config.
-git() { command git -c core.hooksPath=/dev/null -c diff.ignoreSubmodules=none "$@"; }
+# must not get code executed with the owner's credentials), replace refs (an agent sharing the
+# .git directory through a linked worktree could otherwise swap the commits and blobs this
+# script reads) and submodule-ignoring config.
+export GIT_NO_REPLACE_OBJECTS=1
+git() { command git --no-replace-objects -c core.hooksPath=/dev/null -c diff.ignoreSubmodules=none "$@"; }
 # Replace C0/C1 controls (except tab/newline) so PR text cannot drive the terminal, and
 # bidi/zero-width/invisible characters (U+00AD, U+034F, U+061C, U+115F, U+1160, U+180E,
 # U+200B-200F, U+2028-202E, U+2060-2064, U+2066-206F, U+3164, U+FE00-FE0F, U+FEFF, U+FFA0,
 # U+FFF9-FFFB and the Tags block U+E0000-E007F) so it cannot disguise paths. Raw non-UTF-8
 # bytes 0x80-0x9F are left alone because they are also UTF-8 continuation bytes.
+# Also: U+17B4-17B5, U+180B-180D, U+180F, U+1BCA0-1BCA3, U+1D173-1D17A, U+E0100-E01EF.
 sanitize() {
   LC_ALL=C sed -e 's/\xc2[\x80-\x9f\xad]/?/g' -e 's/\xcd\x8f/?/g' -e 's/\xd8\x9c/?/g' \
-    -e 's/\xe1\x85[\x9f\xa0]/?/g' -e 's/\xe1\xa0\x8e/?/g' \
+    -e 's/\xe1\x85[\x9f\xa0]/?/g' -e 's/\xe1\x9e[\xb4\xb5]/?/g' -e 's/\xe1\xa0[\x8b-\x8f]/?/g' \
     -e 's/\xe2\x80[\x8b-\x8f\xa8-\xae]/?/g' -e 's/\xe2\x81[\xa0-\xa4\xa6-\xaf]/?/g' -e 's/\xe3\x85\xa4/?/g' \
     -e 's/\xef\xb8[\x80-\x8f]/?/g' -e 's/\xef\xbb\xbf/?/g' -e 's/\xef\xbe\xa0/?/g' -e 's/\xef\xbf[\xb9-\xbb]/?/g' \
-    -e 's/\xf3\xa0[\x80\x81][\x80-\xbf]/?/g' | LC_ALL=C tr '\000-\010\013-\037\177' '?'
+    -e 's/\xf0\x9b\xb2[\xa0-\xa3]/?/g' -e 's/\xf0\x9d\x85[\xb3-\xba]/?/g' \
+    -e 's/\xf3\xa0[\x80\x81][\x80-\xbf]/?/g' -e 's/\xf3\xa0[\x84-\x87][\x80-\xbf]/?/g' | LC_ALL=C tr '\000-\010\013-\037\177' '?'
 }
 # Single-line fields (titles, URLs) additionally lose embedded newlines so they cannot forge packet lines.
 oneline() { sanitize | awk 'NR > 1 { printf "?" } { printf "%s", $0 }'; }
@@ -115,16 +120,29 @@ resolve_repo() {
   fi
   valid_repo "$DEFAULT_REPO" || die "invalid repository name: $DEFAULT_REPO"
   [ -n "$REPO" ] || REPO=$DEFAULT_REPO
-  if [ "$REPO" != "$DEFAULT_REPO" ]; then
+  if [ "${REPO,,}" != "${DEFAULT_REPO,,}" ]; then   # GitHub names are case-insensitive
     say "${HI}!!! NON-DEFAULT REPOSITORY: $REPO (default is $DEFAULT_REPO) !!!${NO}"
+  else
+    REPO=$DEFAULT_REPO
   fi
   # Objects are fetched from origin only when origin is (or may be) $REPO; a known different
   # GitHub repository at origin (a fork, a mirror) means fetching from $REPO's own URL instead.
   FETCH_REMOTE=origin
-  if [ -n "$origin_repo" ] && [ "$origin_repo" != "$REPO" ]; then
+  if [ -n "$origin_repo" ] && [ "${origin_repo,,}" != "${REPO,,}" ]; then
     FETCH_REMOTE="https://github.com/$REPO.git"
     say "origin is $origin_repo; fetching PR objects from $FETCH_REMOTE"
   fi
+}
+
+# The repository-level config is shared with every linked worktree, so an agent could have
+# planted settings that change what git fetches or run commands during this script. Refuse
+# when any such key is set at repository level; they belong in the owner's global config.
+check_local_config() {
+  local bad
+  bad=$(git -C "$TOP" config --local --name-only --get-regexp \
+    '^(core\.(fsmonitor|sshcommand|gitproxy|askpass|alternaterefscommand)|credential\..*|remote\..*\.(uploadpack|receivepack|proxy|vcs)|url\..*\.(insteadof|pushinsteadof)|protocol\..*\.allow|http\..*|include\.path|includeif\..*)$' \
+    2>/dev/null || true)
+  [ -z "$bad" ] || die "repository-level git config sets keys this gate does not trust ($(printf '%s' "$bad" | tr '\n' ' ' | sanitize)); move them to your global config or remove them, then retry"
 }
 
 # Trust only the primary worktree's copy of this script.
@@ -243,8 +261,10 @@ in_scope() {
 
 # Pattern lists share the gate-files.txt format: one bash pattern per line, "#" comments.
 # -a: a NUL or invalid byte in the file must not make grep go silent and empty the list.
+# A leading byte-order mark is dropped so the first pattern still matches.
 read_patterns() { # file -> prints trimmed, non-comment, non-empty lines
-  LC_ALL=C grep -av '^[[:space:]]*#' "$1" | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | LC_ALL=C grep -av '^$' || true
+  LC_ALL=C sed -e '1s/^\xef\xbb\xbf//' "$1" | LC_ALL=C grep -av '^[[:space:]]*#' \
+    | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | LC_ALL=C grep -av '^$' || true
 }
 
 # Gate patterns come from main's exact commit, never from the PR or the working tree.
@@ -272,9 +292,13 @@ load_risky_list() {
   fi
 }
 
+# A pattern ending in "/" is a directory prefix (like Allowed paths); anything else is a bash glob.
 match_any() { # path pattern...
   local p=$1 g; shift
-  for g in "$@"; do [[ $p == $g ]] && return 0; done
+  for g in "$@"; do
+    if [[ $g == */ ]]; then [[ $p == "$g"* ]] && return 0
+    else [[ $p == $g ]] && return 0; fi
+  done
   return 1
 }
 is_gate() { match_any "$1" "${GATE_PATTERNS[@]}"; }
@@ -292,7 +316,8 @@ classify() {
   while IFS= read -r -d '' meta && IFS= read -r -d '' p; do
     line="  ${meta##* }  ${p//$'\n'/?}"   # sanitize() handles other controls when printed
     om=${meta:1:6} nm=${meta:8:6}
-    if [ "$om" != "$nm" ] && [ "$om" != 000000 ] && [ "$nm" != 000000 ]; then line+="  (mode $om -> $nm)"; fi
+    if [ "$om" != "$nm" ] && [ "$om" != 000000 ] && [ "$nm" != 000000 ]; then line+="  (mode $om -> $nm)"
+    elif [ "$om" = 000000 ] && [ "$nm" = 100755 ]; then line+="  (new executable)"; fi
     case " ${meta:1:13} " in *' 120000 '*|*' 160000 '*) special+="$line"$'\n' ;; esac
     if [ ${#GLOBS[@]} -gt 0 ] && in_scope "$p"; then say "$line" >>"$TMP/in"; else say "$line" >>"$TMP/out"; fi
     if is_gate "$p"; then GATE=1; GATE_PATHS+=("$p"); say "$line" >>"$TMP/gate"; fi
@@ -326,7 +351,7 @@ find_preview() {
 check_ui() {
   PREVIEW='No UI change'
   [ "$UI" = 1 ] || return 0
-  BRIEF=$(LC_ALL=C grep -aEim1 '^[[:space:]*_-]*approved brief[*_]*:.*[[:alnum:]]' "$TMP/body" \
+  BRIEF=$(LC_ALL=C grep -aEim1 '^[[:space:]*_-]*approved brief[*_]*:.*[^[:space:][:punct:][:cntrl:]]' "$TMP/body" \
     | LC_ALL=C sed -E 's/^[[:space:]*_-]*approved brief[*_]*:[*_]*[[:space:]]*//I') \
     || die "UI changed but the PR body has no 'Approved brief:' line with real content"
   [ -n "$BRIEF" ] || die "UI changed but the PR body has no 'Approved brief:' line with real content"
@@ -349,7 +374,7 @@ run_codex() {
   done
   cp "$TMP/gate-files.txt" "$dir/gate-files.txt"
   out=$(mktemp -d "${TMPDIR:-/tmp}/land-codex-$PR-XXXXXX")
-  "$dir/codex-review.sh" --repo-root "$TOP" --base "$BASE" --head "$HEAD_SHA" --pr "$PR" \
+  bash "$dir/codex-review.sh" --repo-root "$TOP" --base "$BASE" --head "$HEAD_SHA" --pr "$PR" \
     --contract "$TMP/contract.md" --out "$out" </dev/null || rc=$?
   case $rc in
     0) if [ -s "$out/outcome" ]; then
@@ -359,8 +384,10 @@ run_codex() {
          CODEX_RESULT="Codex review: finished (no outcome recorded; see $out)"
        fi ;;
     1) die "blocked by unresolved Codex findings (see $out)" ;;
-    2) rm -rf "$out"; CODEX_RESULT="Codex review did not run (exit 2); continuing without it"; say "$CODEX_RESULT" ;;
-    *) die "codex-review.sh failed unexpectedly (exit $rc); fix it on main or re-run without --codex" ;;
+    2) if find "$out" -type f | grep -q .; then CODEX_RESULT="Codex review did not run (exit 2; see $out); continuing without it"
+       else rm -rf "$out"; CODEX_RESULT="Codex review did not run (exit 2); continuing without it"; fi
+       say "$CODEX_RESULT" ;;
+    *) die "codex-review.sh failed unexpectedly (exit $rc; its output directory is $out); fix it on main or re-run without --codex" ;;
   esac
 }
 
@@ -423,7 +450,9 @@ recheck_and_merge() {
   main=$(main_sha)
   [ "$main" = "$MAIN_SHA" ] || die "main moved since review ($MAIN_SHA -> $main); re-run"
   MERGE_STARTED=1
-  gh pr merge "$PR" -R "$REPO" --squash --match-head-commit "$HEAD_SHA" </dev/null || die "gh pr merge failed"
+  # The squash commit records the reviewed title and the PR URL, not whatever the PR says now.
+  gh pr merge "$PR" -R "$REPO" --squash --match-head-commit "$HEAD_SHA" \
+    --subject "$(field .title | oneline) (#$PR)" --body "$(field .url | oneline)" </dev/null || die "gh pr merge failed"
   MERGED=1
   say "Merged PR #$PR at $HEAD_SHA into $REPO main (with a merge queue, gh reports success on enqueue; confirm on GitHub)."
 }
@@ -437,6 +466,7 @@ main() {
   set -f            # PR-supplied globs must never expand against the filesystem
   TMP=$(mktemp -d)
   locate_self
+  check_local_config
   resolve_repo
   check_self
   cd "$TOP"

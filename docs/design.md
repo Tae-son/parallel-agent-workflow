@@ -132,3 +132,6 @@ project-specific and are not included here.
   later status marked that deployment inactive.
 - PR body parsing is Markdown-light: HTML comments are stripped everywhere, including inside
   code spans, and a `#` line inside a fenced block ends the section being read.
+- `install.sh` merges the Claude hook into an existing `.claude/settings.json` by parsing and
+  re-serialising it: formatting, duplicate keys and numbers beyond double precision are not
+  preserved. It keeps the file's mode.

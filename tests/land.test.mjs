@@ -93,11 +93,17 @@ function makeFixture({
   }
   git(primary, 'add', '-A');
   git(primary, 'commit', '--quiet', '-m', 'base');
-  // originUrl: configure a GitHub-looking origin URL (for repo detection) that git rewrites to the
-  // local bare repository for every fetch, so the test stays offline.
-  git(primary, 'remote', 'add', 'origin', originUrl ?? origin);
-  if (originUrl) git(primary, 'config', `url.${origin}.insteadOf`, originUrl);
+  // originUrl: configure a GitHub-looking origin URL (for repo detection) that a *global* config
+  // rewrites to the local bare repository for every fetch, so the test stays offline. The
+  // rewrite must not live in the repository config: land.sh refuses repository-level insteadOf.
+  git(primary, 'remote', 'add', 'origin', origin);
   git(primary, 'push', '--quiet', 'origin', 'main');
+  let globalConfig = '/dev/null';
+  if (originUrl) {
+    git(primary, 'remote', 'set-url', 'origin', originUrl);
+    globalConfig = path.join(dir, 'gitconfig');
+    fs.writeFileSync(globalConfig, `[url "${origin}"]\n\tinsteadOf = ${originUrl}\n`);
+  }
 
   git(dir, 'clone', '--quiet', origin, agent);
   writeFiles(agent, files);
@@ -121,7 +127,7 @@ function makeFixture({
   }));
   fs.writeFileSync(path.join(bin, 'gh'), `#!/bin/sh\nexec '${process.execPath}' '${ghStub}' "$@"\n`, { mode: 0o755 });
 
-  return { dir, primary, stub, bin, headSha, mainSha };
+  return { dir, primary, stub, bin, headSha, mainSha, globalConfig, origin };
 }
 
 // Stub codex-review.sh: records which copy ran and which sibling files it could see.
@@ -145,7 +151,7 @@ const quote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 // session with no controlling terminal.
 function land(fx, args = [String(N)], { answers = '', tty = true, landPath, repoEnv = REPO } = {}) {
   const script = landPath ?? path.join(fx.primary, 'scripts/land.sh');
-  const env = { ...gitEnv, PATH: `${fx.bin}:${process.env.PATH}`, SHELL: '/bin/bash', LAND_GH_STUB_DIR: fx.stub };
+  const env = { ...gitEnv, PATH: `${fx.bin}:${process.env.PATH}`, SHELL: '/bin/bash', LAND_GH_STUB_DIR: fx.stub, GIT_CONFIG_GLOBAL: fx.globalConfig ?? '/dev/null' };
   if (repoEnv !== null) env.LAND_REPO = repoEnv; else delete env.LAND_REPO;
   const opts = { cwd: fx.primary, env, input: answers, encoding: 'utf8', timeout: 30000 };
   const r = tty
@@ -160,7 +166,8 @@ function land(fx, args = [String(N)], { answers = '', tty = true, landPath, repo
 
 function assertMerged(r, fx, repo = REPO) {
   assert.equal(r.status, 0, r.output);
-  assert.deepEqual(r.merges, [`pr merge ${N} -R ${repo} --squash --match-head-commit ${fx.headSha}`]);
+  assert.equal(r.merges.length, 1, r.output);
+  assert.ok(r.merges[0].startsWith(`pr merge ${N} -R ${repo} --squash --match-head-commit ${fx.headSha} --subject `), r.merges[0]);
 }
 
 function assertRefused(r, pattern) {
@@ -518,6 +525,90 @@ test('--codex exit 1 refuses', () => {
   assertRefused(r, /blocked by unresolved Codex findings/);
 });
 
+test('the squash commit carries the reviewed title and the PR URL', () => {
+  const fx = makeFixture({ pr: { title: 'Tidy\x1b[2Jnotes' } });
+  const r = land(fx, undefined, { answers: typed });
+  assertMerged(r, fx);
+  assert.equal(r.merges[0], `pr merge ${N} -R ${REPO} --squash --match-head-commit ${fx.headSha} --subject Tidy?[2Jnotes (#${N}) --body https://github.com/${REPO}/pull/${N}`);
+});
+
+test('repository-level config keys that could alter fetches or run commands are refused', () => {
+  for (const [key, value] of [
+    ['url.https://example.invalid/.insteadOf', 'https://github.com/'],
+    ['remote.origin.uploadpack', 'sh -c "echo pwned"'],
+    ['core.fsmonitor', 'sh -c "echo pwned"'],
+    ['credential.helper', 'sh -c "echo pwned"'],
+    ['protocol.ext.allow', 'always'],
+  ]) {
+    const fx = makeFixture();
+    git(fx.primary, 'config', key, value);
+    const r = land(fx, undefined, { answers: typed });
+    assertRefused(r, /repository-level git config sets keys this gate does not trust/);
+    assert.match(r.output, new RegExp(key.toLowerCase().replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')), r.output);
+  }
+});
+
+test('a replace ref planted in the shared .git directory does not change what is reviewed', () => {
+  const fx = makeFixture({ files: { 'tests/planted.test.mjs': 'export const planted = 1;\n' } });
+  // A harmless commit that an agent would like the owner to see instead of the real head.
+  const decoyDir = path.join(fx.dir, 'decoy');
+  git(fx.dir, 'clone', '--quiet', fx.origin, decoyDir);
+  fs.writeFileSync(path.join(decoyDir, 'docs/notes.md'), 'harmless\n');
+  git(decoyDir, 'add', '-A'); git(decoyDir, 'commit', '--quiet', '-m', 'decoy');
+  git(decoyDir, 'push', '--quiet', 'origin', 'HEAD:refs/heads/decoy');
+  git(fx.primary, 'fetch', '--quiet', 'origin', 'decoy');
+  const decoy = git(fx.primary, 'rev-parse', 'FETCH_HEAD');
+  git(fx.primary, 'fetch', '--quiet', 'origin', `refs/pull/${N}/head`);
+  git(fx.primary, 'replace', fx.headSha, decoy);
+  const r = land(fx, undefined, { answers: typed });
+  assertRefused(r, /no confirmation \(EOF\)|confirmation did not match/);
+  assert.match(r.output, /Gate files:\s+A\s+tests\/planted\.test\.mjs/);
+  assert.match(r.output, /\+export const planted = 1;/);
+});
+
+test('a pattern ending in "/" is a directory prefix in gate-files.txt and ui-paths.txt', () => {
+  const gate = land(makeFixture({ gateListText: 'docs/\n', files: { 'docs/notes.md': 'x\n' } }), undefined, { answers: typed });
+  assertRefused(gate, /Gate files changed\. Type 'gate'/);
+  assert.match(gate.output, /Gate files:\s+M\s+docs\/notes\.md/);
+  const ui = land(makeFixture({ uiListText: 'docs/\n', files: { 'docs/notes.md': 'x\n' } }), undefined, { answers: typed });
+  assertRefused(ui, /no 'Approved brief:' line with real content/);
+});
+
+test('a byte-order mark at the start of a pattern list does not disable its first pattern', () => {
+  const r = land(makeFixture({ uiListText: '﻿docs/*\n', files: { 'docs/notes.md': 'x\n' } }), undefined, { answers: typed });
+  assertRefused(r, /no 'Approved brief:' line with real content/);
+});
+
+test('a new executable file is flagged in the packet', () => {
+  const fx = makeFixture({ files: { 'docs/run.sh': '#!/bin/sh\n' } });
+  const agent = path.join(fx.dir, 'agent');
+  fs.chmodSync(path.join(agent, 'docs/run.sh'), 0o755);
+  git(agent, 'add', '-A');
+  git(agent, 'commit', '--quiet', '--amend', '--no-edit');
+  git(agent, 'push', '--quiet', '--force', 'origin', `HEAD:refs/pull/${N}/head`);
+  const headSha = git(agent, 'rev-parse', 'HEAD');
+  const fixture = JSON.parse(fs.readFileSync(path.join(fx.stub, 'fixture.json'), 'utf8'));
+  for (const v of fixture.prViews) v.headRefOid = headSha;
+  fs.writeFileSync(path.join(fx.stub, 'fixture.json'), JSON.stringify(fixture));
+  fx.headSha = headSha;
+  const r = land(fx, undefined, { answers: typed });
+  assertMerged(r, fx);
+  assert.match(r.output, /A\s+docs\/run\.sh\s+\(new executable\)/);
+});
+
+test('an Approved brief written in a non-Latin script counts as real content', () => {
+  const fx = makeFixture({ files: { 'src/app.js': 'x\n' }, pr: { body: `Approved brief: ${String.fromCodePoint(0xc2b9, 0xc778)}\n\nAllowed paths:\n- src/\n` } });
+  const r = land(fx, undefined, { answers: `${N}\npreview checked\n` });
+  assertMerged(r, fx);
+});
+
+test('--repo differing only in case from the default is the same repository', () => {
+  const fx = makeFixture();
+  const r = land(fx, ['--repo', 'Example-Org/Example-Repo', String(N)], { answers: typed });
+  assertMerged(r, fx);
+  assert.doesNotMatch(r.output, /NON-DEFAULT REPOSITORY/);
+});
+
 test('a gate file made to look binary by a NUL byte still has its diff printed in full', () => {
   const fx = makeFixture({ files: { 'tests/evil.test.mjs': '// v2 \0 nul in a comment\nexport const planted = 1;\n' } });
   const r = land(fx, undefined, { answers: `${N}\ngate\n` });
@@ -582,7 +673,7 @@ test('origin host and .git suffix are matched case-insensitively', () => {
 
 test('--codex with an unexpected exit code refuses instead of continuing', () => {
   const r = land(makeFixture({ codexExit: 3 }), ['--codex', String(N)], { answers: typed });
-  assertRefused(r, /codex-review\.sh failed unexpectedly \(exit 3\)/);
+  assertRefused(r, /codex-review\.sh failed unexpectedly \(exit 3; its output directory is /);
 });
 
 test('--codex exit 2 continues without the review after confirmation', () => {

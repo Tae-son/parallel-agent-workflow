@@ -8,7 +8,10 @@ import path from 'node:path';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const installer = path.join(root, 'install.sh');
-const env = { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+const env = {
+  ...process.env, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1',
+  GIT_AUTHOR_NAME: 'Test', GIT_AUTHOR_EMAIL: 'test@example.invalid', GIT_COMMITTER_NAME: 'Test', GIT_COMMITTER_EMAIL: 'test@example.invalid',
+};
 
 function git(cwd, ...args) {
   const r = spawnSync('git', args, { cwd, env, encoding: 'utf8' });
@@ -182,7 +185,7 @@ test('an existing core.hooksPath other than .githooks is left alone and reported
   const r = install(['--owner', 'someone', target]);
   assert.equal(r.status, 0, text(r));
   assert.equal(git(target, 'config', 'core.hooksPath'), '.husky');
-  assert.match(r.stdout, /core\.hooksPath is '\.husky' and was left unchanged/);
+  assert.match(r.stdout, /core\.hooksPath is '\.husky' \(repository-level config\) and was left unchanged/);
 });
 
 test('an inherited GIT_DIR cannot redirect the config write to another repository', () => {
@@ -320,6 +323,150 @@ test('an empty .claude/settings.json is treated as absent', () => {
   const r = install(['--owner', 'someone', target]);
   assert.equal(r.status, 0, text(r));
   assert.ok(fs.readFileSync(path.join(target, '.claude/settings.json')).equals(fs.readFileSync(path.join(root, '.claude/settings.json'))));
+});
+
+test('a read-only .github directory makes CODEOWNERS a refusal; later steps still run and the exit is 2', () => {
+  const target = freshRepo('readonly-github');
+  fs.mkdirSync(path.join(target, '.github'));
+  fs.chmodSync(path.join(target, '.github'), 0o555);
+  try {
+    const r = install(['--owner', 'someone', '--no-tests', target]);
+    assert.equal(r.status, 2, text(r));
+    assert.match(r.stdout, /\.github\/CODEOWNERS \(directory not writable\)/);
+    assert.ok(fs.existsSync(path.join(target, '.claude/settings.json')), 'settings step still ran');
+    assert.equal(git(target, 'config', '--local', 'core.hooksPath'), '.githooks');
+    assert.match(r.stdout, /Next steps/);
+  } finally { fs.chmodSync(path.join(target, '.github'), 0o755); }
+});
+
+test('a stale .git/config.lock makes the hooksPath step a note, not an abort', () => {
+  const target = freshRepo('config-lock');
+  fs.writeFileSync(path.join(target, '.git/config.lock'), '');
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.match(r.stdout, /could not set core\.hooksPath: .*lock/);
+  assert.match(r.stdout, /4\. Hooks: core\.hooksPath was left as it is/);
+});
+
+test('a hooksPath coming through an include or worktree config counts as repository-level and is left alone', () => {
+  const inc = freshRepo('include-hooks');
+  fs.writeFileSync(path.join(inc, '.git/shared.cfg'), '[core]\n\thooksPath = .husky/_\n');
+  fs.appendFileSync(path.join(inc, '.git/config'), '[include]\n\tpath = shared.cfg\n');
+  const r1 = install(['--owner', 'someone', inc]);
+  assert.equal(r1.status, 0, text(r1));
+  assert.match(r1.stdout, /core\.hooksPath is '\.husky\/_' \(repository-level config\) and was left unchanged/);
+  assert.equal(git(inc, 'config', 'core.hooksPath'), '.husky/_');
+
+  const wt = freshRepo('worktree-hooks');
+  git(wt, 'config', 'extensions.worktreeConfig', 'true');
+  git(wt, 'config', '--worktree', 'core.hooksPath', '.husky');
+  const r2 = install(['--owner', 'someone', wt]);
+  assert.equal(r2.status, 0, text(r2));
+  assert.match(r2.stdout, /core\.hooksPath is '\.husky' \(repository-level config\) and was left unchanged/);
+  assert.equal(git(wt, 'config', 'core.hooksPath'), '.husky');
+});
+
+test('an uninitialised submodule directory is refused as a destination', () => {
+  const upstream = freshRepo('sub-upstream');
+  git(upstream, 'add', '-A'); git(upstream, 'commit', '-qm', 'init');
+  const parent = freshRepo('sub-parent');
+  git(parent, '-c', 'protocol.file.allow=always', 'submodule', 'add', '-q', upstream, '.github');
+  git(parent, 'add', '-A'); git(parent, 'commit', '-qm', 'add submodule');
+  const clone = path.join(tmp, 'sub-clone');
+  git(tmp, 'clone', '-q', parent, clone);
+  assert.deepEqual(fs.readdirSync(path.join(clone, '.github')), [], 'submodule is uninitialised');
+  const r = install(['--owner', 'someone', clone]);
+  assert.equal(r.status, 2, text(r));
+  assert.deepEqual(fs.readdirSync(path.join(clone, '.github')), [], 'nothing written into the submodule path');
+  assert.match(r.stdout, /\.github\/pull_request_template\.md \(a submodule is in its path\)/);
+  assert.match(r.stdout, /\.github\/CODEOWNERS \(a submodule is in its path\)/);
+});
+
+test('owner logins are limited to 39 ASCII characters even with hyphens and under a UTF-8 locale', () => {
+  const target = freshRepo('owner-rules');
+  assert.notEqual(install(['--owner', 'a-'.repeat(38) + 'a', target]).status, 0, '77 characters');
+  const r = spawnSync(installer, ['--owner', 'josé', target], { cwd: root, env: { ...env, LC_ALL: 'C.UTF-8' }, encoding: 'utf8' });
+  assert.notEqual(r.status, 0, 'non-ASCII letter');
+  assert.deepEqual(fs.readdirSync(target).filter((n) => n !== '.git'), ['README.md']);
+});
+
+test('hooksPath is not set when .githooks/pre-push could not be installed', () => {
+  const target = freshRepo('githooks-is-file');
+  fs.writeFileSync(path.join(target, '.githooks'), 'not a dir\n');
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 2, text(r));
+  const cfg = spawnSync('git', ['config', '--local', 'core.hooksPath'], { cwd: target, env, encoding: 'utf8' });
+  assert.notEqual(cfg.status, 0, 'hooksPath must stay unset');
+  assert.match(r.stdout, /core\.hooksPath was not set because \.githooks\/pre-push is not in place/);
+});
+
+test('symlinked hooks in .git/hooks are pointed out too', () => {
+  const target = freshRepo('symlinked-hook');
+  fs.mkdirSync(path.join(target, 'tools'));
+  fs.writeFileSync(path.join(target, 'tools/pre-commit'), '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+  fs.symlinkSync('../../tools/pre-commit', path.join(target, '.git/hooks/pre-commit'));
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 0, text(r));
+  assert.match(r.stdout, /existing hooks in .*\.git\/hooks are no longer run .*pre-commit/);
+});
+
+test('written files get 755 or 644 regardless of umask, and a merged settings file keeps its mode', () => {
+  const target = freshRepo('modes');
+  fs.mkdirSync(path.join(target, '.claude'));
+  fs.writeFileSync(path.join(target, '.claude/settings.json'), '{"env":{"SECRET":"x"}}', { mode: 0o600 });
+  const r = spawnSync('bash', ['-c', `umask 077 && ${JSON.stringify(installer)} --owner someone ${JSON.stringify(target)}`], { cwd: root, env, encoding: 'utf8' });
+  assert.equal(r.status, 0, text(r));
+  const mode = (p) => fs.statSync(path.join(target, p)).mode & 0o777;
+  assert.equal(mode('scripts/land.sh'), 0o755);
+  assert.equal(mode('CONTRIBUTING.md'), 0o644);
+  assert.equal(mode('.github/CODEOWNERS'), 0o644);
+  assert.equal(mode('.claude/settings.json'), 0o600);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(target, '.claude/settings.json'), 'utf8')).env, { SECRET: 'x' });
+});
+
+test('a placeholder line among other CODEOWNERS rules is still warned about', () => {
+  const target = freshRepo('placeholder-plus');
+  fs.mkdirSync(path.join(target, '.github'));
+  fs.writeFileSync(path.join(target, '.github/CODEOWNERS'), '* @OWNER\n/docs/ @docs-team\n');
+  assert.match(install([target]).stdout, /still holds the placeholder @OWNER/);
+  const r = install(['--owner', 'real', target]);
+  assert.equal(fs.readFileSync(path.join(target, '.github/CODEOWNERS'), 'utf8'), '* @OWNER\n/docs/ @docs-team\n', 'mixed file is not rewritten');
+  assert.match(r.stdout, /still contains the placeholder line/);
+});
+
+test('a whitespace-only or BOM-prefixed settings file is handled', () => {
+  const ws = freshRepo('ws-settings');
+  fs.mkdirSync(path.join(ws, '.claude'));
+  fs.writeFileSync(path.join(ws, '.claude/settings.json'), '\n  \n');
+  const r1 = install(['--owner', 'someone', ws]);
+  assert.equal(r1.status, 0, text(r1));
+  assert.ok(fs.readFileSync(path.join(ws, '.claude/settings.json')).equals(fs.readFileSync(path.join(root, '.claude/settings.json'))));
+  const bom = freshRepo('bom-settings');
+  fs.mkdirSync(path.join(bom, '.claude'));
+  fs.writeFileSync(path.join(bom, '.claude/settings.json'), '﻿{"permissions":{"allow":[]}}');
+  const r2 = install(['--owner', 'someone', bom]);
+  assert.equal(r2.status, 0, text(r2));
+  const merged = JSON.parse(fs.readFileSync(path.join(bom, '.claude/settings.json'), 'utf8'));
+  assert.deepEqual(merged.permissions, { allow: [] });
+  assert.match(merged.hooks.PreToolUse[0].hooks[0].command, /agent-guard/);
+});
+
+test('a refused ci.yml is reflected in the next steps', () => {
+  const target = freshRepo('ci-refused');
+  fs.mkdirSync(path.join(target, '.github/workflows'), { recursive: true });
+  fs.symlinkSync(path.join(tmp, 'nowhere.yml'), path.join(target, '.github/workflows/ci.yml'));
+  const r = install(['--owner', 'someone', target]);
+  assert.equal(r.status, 2, text(r));
+  assert.match(r.stdout, /2\. The CI workflow could not be installed/);
+  assert.doesNotMatch(r.stdout, /The installed CI workflow runs/);
+});
+
+test('GIT_TRACE variables cannot make git write trace files outside the target', () => {
+  const target = freshRepo('git-trace');
+  const trace = path.join(tmp, 'trace.log');
+  const r = spawnSync(installer, ['--owner', 'someone', target], { cwd: root, env: { ...env, GIT_TRACE: trace, GIT_TRACE2_EVENT: `${trace}.2` }, encoding: 'utf8' });
+  assert.equal(r.status, 0, text(r));
+  assert.ok(!fs.existsSync(trace) && !fs.existsSync(`${trace}.2`), 'no trace files written');
 });
 
 test('"--" ends option parsing and a target after it is accepted', () => {
