@@ -35,6 +35,9 @@ it. No production profile or trust record is changed by these tests.
    is refused for manual reconciliation, including with `--force`. Automatic merging
    supports command handlers only; other handler types and unsupported structures
    are preserved and refused rather than guessed at.
+   Recognized optional command fields are type-checked against the reference API;
+   numeric fields must be nonnegative JavaScript-safe integers (or native optional
+   nulls), so the installer does not round large timeout/context-limit values.
 4. Confirm this hook is enabled and trusted for the intended working directory.
    App-server clients can inspect `hooks/list` for that directory; check `enabled`,
    `trustStatus`, source path, current hash, and discovery diagnostics. Merely seeing
@@ -46,7 +49,8 @@ it. No production profile or trust record is changed by these tests.
    command to execute successfully. Record runtime version and execution surface.
 
 The hook command resolves the repository from its invocation directory, including
-nested paths and linked worktrees. It converts repository-discovery failures,
+nested paths and linked worktrees, and checks that Git can read that repository's
+branch state before invoking the checker. It converts discovery/branch-read failures,
 missing Node/guard, and unexpected guard exits into exit 2 with a reason. This only
 works when Codex actually runs the hook: disabled/untrusted hooks, host-level timeouts,
 or a failure to launch the hook shell can still leave commands unguarded.
@@ -147,5 +151,6 @@ rulesets for server-side enforcement, and OS isolation for stronger containment.
 - [Codex app-server](https://developers.openai.com/codex/app-server)
 - [Codex exec hook payload, v0.165.0](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs)
 - [Codex stdin exclusion, v0.165.0](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs)
+- [Codex command-handler field types, v0.165.0](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/protocol/src/hooks.rs)
 - [Hermes plugin development](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/)
 - [Hermes event hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks)

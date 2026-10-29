@@ -300,6 +300,22 @@ try {
         if (hook.type !== 'command' || typeof hook.command !== 'string' || !hook.command.trim()) {
           throw new Error('automatic merge supports command handlers only; reconcile other forms manually');
         }
+        // Match recognized command fields in Codex rust-v0.165.0 protocol/hooks.rs.
+        // Bad fields anywhere can make native discovery reject the entire source.
+        if (hook.async !== undefined && typeof hook.async !== 'boolean') throw new Error('async must be boolean');
+        for (const key of ['commandWindows', 'command_windows', 'statusMessage']) {
+          if (hook[key] !== undefined && hook[key] !== null && typeof hook[key] !== 'string') {
+            throw new Error(`${key} must be a string or null`);
+          }
+        }
+        if (Object.hasOwn(hook, 'commandWindows') && Object.hasOwn(hook, 'command_windows')) {
+          throw new Error('duplicate commandWindows/command_windows alias');
+        }
+        for (const key of ['timeout', 'additionalContextLimit']) {
+          if (hook[key] !== undefined && hook[key] !== null && (!Number.isSafeInteger(hook[key]) || hook[key] < 0)) {
+            throw new Error(`${key} must be a nonnegative safe integer or null`);
+          }
+        }
         if (typeof hook.command === 'string' && hook.command.includes('agent-guard.mjs')) {
           if (event !== 'PreToolUse' || group.matcher !== wanted.matcher || !isDeepStrictEqual(hook, wanted.hooks[0])) {
             throw new Error('existing agent-guard registration differs; review it manually (even with --force)');

@@ -292,6 +292,7 @@ for (const [label, content] of [
   ['invalid-matcher', '{"hooks":{"PreToolUse":[{"matcher":false,"hooks":[]}]}}'],
   ['missing-command', '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command"}]}]}}'],
   ['unknown-handler', '{"hooks":{"PreToolUse":[{"hooks":[{"type":"future-handler"}]}]}}'],
+  ['duplicate-windows-alias', JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'printf harmless', commandWindows: null, command_windows: null }] }] } })],
   ['async-guard', JSON.stringify({ hooks: { PreToolUse: [{ matcher: '^Bash$', hooks: [{ type: 'command', command: 'node agent-guard.mjs', async: true }] }] } })],
   ['wrong-matcher', JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'node agent-guard.mjs' }] }] } })],
   ['post-only', JSON.stringify({ hooks: { PostToolUse: [{ hooks: [{ type: 'command', command: 'node agent-guard.mjs' }] }] } })],
@@ -309,6 +310,44 @@ for (const [label, content] of [
     }
   });
 }
+
+for (const [field, value] of [
+  ['async', 'false'], ['async', null], ['timeout', 'ten'], ['timeout', -1], ['timeout', 1.5],
+  ['timeout', Number.MAX_SAFE_INTEGER + 1], ['commandWindows', 3], ['command_windows', false],
+  ['statusMessage', []], ['additionalContextLimit', 'many'], ['additionalContextLimit', -1],
+]) {
+  test(`Codex native field ${field}=${JSON.stringify(value)} is refused without rewriting`, () => {
+    const target = freshRepo(`codex-field-${field}-${JSON.stringify(value).replace(/\W/g, '_')}`);
+    fs.mkdirSync(path.join(target, '.codex'));
+    const hooks = path.join(target, '.codex/hooks.json');
+    const original = JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Write', hooks: [
+      { type: 'command', command: 'printf harmless', [field]: value },
+    ] }] } });
+    fs.writeFileSync(hooks, original);
+    for (const flags of [[], ['--force']]) {
+      const r = install([...flags, '--no-hooks-path', target]);
+      assert.equal(r.status, 2, text(r));
+      assert.equal(fs.readFileSync(hooks, 'utf8'), original);
+      assert.match(r.stdout, /Refused \(never touched\):[\s\S]*\.codex\/hooks\.json/);
+    }
+  });
+}
+
+test('Codex native optional fields and nulls survive a valid registration merge', () => {
+  const target = freshRepo('codex-valid-optionals');
+  fs.mkdirSync(path.join(target, '.codex'));
+  const hooks = path.join(target, '.codex/hooks.json');
+  const original = { hooks: { PreToolUse: [{ hooks: [
+    { type: 'command', command: 'printf harmless', async: false, timeout: 0,
+      command_windows: 'echo harmless', statusMessage: null, additionalContextLimit: 0 },
+    { type: 'command', command: 'printf other', timeout: null, commandWindows: null,
+      statusMessage: 'checking', additionalContextLimit: null },
+  ] }] } };
+  fs.writeFileSync(hooks, JSON.stringify(original));
+  const r = install([target]);
+  assert.equal(r.status, 0, text(r));
+  assert.deepEqual(JSON.parse(fs.readFileSync(hooks, 'utf8')).hooks.PreToolUse[0], original.hooks.PreToolUse[0]);
+});
 
 test('Codex symlink destinations are refused without touching their target', () => {
   const target = freshRepo('codex-symlink');

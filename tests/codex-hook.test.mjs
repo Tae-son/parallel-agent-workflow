@@ -114,3 +114,20 @@ test('Codex registration denies when repository discovery fails', () => {
   assert.equal(r.status, 2, r.stderr);
   assert.match(r.stderr, /cannot resolve repository/);
 });
+
+test('Codex registration denies failed Git branch inspection after successful discovery', () => {
+  const broken = path.join(tmp, 'broken Git repository');
+  git(tmp, 'init', '-q', '--template=', '-b', 'main', broken);
+  fs.mkdirSync(path.join(broken, '.claude/hooks'), { recursive: true });
+  fs.copyFileSync(path.join(root, '.claude/hooks/agent-guard.mjs'), path.join(broken, '.claude/hooks/agent-guard.mjs'));
+  const packed = path.join(broken, '.git/packed-refs');
+  fs.writeFileSync(packed, 'invalid packed refs fixture\n');
+  try {
+    assert.equal(git(broken, 'rev-parse', '--show-toplevel'), broken);
+    const branch = spawnSync('git', ['branch', '--show-current'], { cwd: broken, env, encoding: 'utf8' });
+    assert.equal(branch.status, 128);
+    const r = run('git commit -m ordinary', broken);
+    assert.equal(r.status, 2, r.stderr);
+    assert.match(r.stderr, /agent-guard unavailable.*branch/);
+  } finally { fs.rmSync(packed); }
+});
