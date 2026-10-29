@@ -1,0 +1,5 @@
+name: parallel-agent-guard
+version: "0.1.0"
+description: "Project-local terminal guardrail using the kit's existing Claude Bash policy. Not a security boundary."
+provides_hooks:
+  - pre_tool_call
