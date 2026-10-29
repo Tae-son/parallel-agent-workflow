@@ -33,6 +33,10 @@ before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'install-test-')); })
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 const EXPECTED = [
+  '.hermes/plugins/parallel-agent-guard/plugin.yaml',
+  '.hermes/plugins/parallel-agent-guard/__init__.py', 'tests/hermes-agent-guard.test.mjs',
+  'docs/agent-support.md',
+  '.codex/hooks.json', 'tests/codex-hook.test.mjs',
   'scripts/land.sh', 'scripts/codex-review.sh', 'scripts/agents-status.sh', 'scripts/gate-files.txt',
   'scripts/ui-paths.txt', 'scripts/risky-paths.txt', 'scripts/codex-exclude.txt', 'scripts/codex-review-contract.md',
   '.githooks/pre-push', '.github/pull_request_template.md', '.github/workflows/ci.yml', '.github/CODEOWNERS',
@@ -66,6 +70,35 @@ test('installs every kit file into a fresh repository, byte-identical, executabl
   assert.match(r.stdout, /independent QA/);
   assert.match(fs.readFileSync(path.join(target, 'CONTRIBUTING.md'), 'utf8'), /## Independent QA/);
   assert.match(fs.readFileSync(path.join(target, '.github/pull_request_template.md'), 'utf8'), /```independent-qa/);
+});
+
+test('a preserved customised command guard is explicitly reported as unverified', () => {
+  const target = freshRepo('custom-command-guard');
+  fs.mkdirSync(path.join(target, '.claude/hooks'), { recursive: true });
+  const guard = path.join(target, '.claude/hooks/agent-guard.mjs');
+  fs.writeFileSync(guard, '// custom checker\n');
+  const r = install([target]);
+  assert.equal(r.status, 0, text(r));
+  assert.equal(fs.readFileSync(guard, 'utf8'), '// custom checker\n');
+  assert.match(r.stdout, /shared command checker differs.*unverified/);
+});
+
+test('Hermes plugin is staged without changing project configuration or profile state', () => {
+  const target = freshRepo('hermes-staged');
+  fs.mkdirSync(path.join(target, '.hermes'));
+  const projectConfig = '# existing owner configuration\nplugins:\n  enabled: []\n';
+  fs.writeFileSync(path.join(target, '.hermes/config.yaml'), projectConfig);
+  const profile = path.join(tmp, 'hermes-profile');
+  fs.mkdirSync(profile);
+  fs.writeFileSync(path.join(profile, 'config.yaml'), projectConfig);
+  const r = spawnSync(installer, [target], { cwd: root, env: { ...env, HERMES_HOME: profile }, encoding: 'utf8' });
+  assert.equal(r.status, 0, text(r));
+  assert.ok(fs.existsSync(path.join(target, '.hermes/plugins/parallel-agent-guard/__init__.py')));
+  assert.equal(fs.readFileSync(path.join(target, '.hermes/config.yaml'), 'utf8'), projectConfig);
+  assert.equal(fs.readFileSync(path.join(profile, 'config.yaml'), 'utf8'), projectConfig);
+  assert.deepEqual(fs.readdirSync(profile), ['config.yaml']);
+  assert.match(r.stdout, /Hermes.*not activated/);
+  assert.match(r.stdout, /project-only/);
 });
 
 test('a kept, customised skill copy that differs from the other copy is reported', () => {
@@ -227,6 +260,204 @@ test('an existing .claude/settings.json keeps its hooks and gains the agent-guar
   assert.match(r.stdout, /hook already registered/);
   assert.doesNotMatch(r.stdout, /Overwritten/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(target, '.claude/settings.json'), 'utf8')).hooks.PreToolUse.length, 2);
+});
+
+test('Codex hooks merge once, preserve other hooks and leave trust/config files untouched', () => {
+  const target = freshRepo('codex-settings');
+  fs.mkdirSync(path.join(target, '.codex'));
+  const config = '# Owner configuration\n[hooks]\n# Inline hooks need separate review\n';
+  fs.writeFileSync(path.join(target, '.codex/config.toml'), config);
+  const existing = { description: 'keep', hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'keep-me' }] }] } };
+  const hooks = path.join(target, '.codex/hooks.json');
+  fs.writeFileSync(hooks, JSON.stringify(existing), { mode: 0o600 });
+  for (let n = 0; n < 2; n++) {
+    const r = install(['--owner', 'someone', target]);
+    assert.equal(r.status, 0, text(r));
+    const merged = JSON.parse(fs.readFileSync(hooks, 'utf8'));
+    assert.equal(merged.description, 'keep');
+    assert.deepEqual(merged.hooks.PreToolUse[0], existing.hooks.PreToolUse[0]);
+    assert.equal(merged.hooks.PreToolUse.length, 2);
+    assert.deepEqual(merged.hooks.PreToolUse[1], JSON.parse(fs.readFileSync(path.join(root, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0]);
+    assert.equal(fs.statSync(hooks).mode & 0o777, 0o600);
+    assert.equal(fs.readFileSync(path.join(target, '.codex/config.toml'), 'utf8'), config);
+    assert.match(r.stdout, /Codex.*not activated/);
+    assert.match(r.stdout, /\/hooks/);
+    assert.match(r.stdout, /inline/);
+  }
+});
+
+for (const [label, content] of [
+  ['malformed', '{broken'], ['wrong-event-shape', '{"hooks":{"PreToolUse":{}}}'],
+  ...[[], 3, {}, false].map((description, index) => [`bad-description-${index}`, JSON.stringify({ description, hooks: {} })]),
+  ['unknown-root-version', '{"version":1,"hooks":{}}'],
+  ['unknown-root-state', '{"state":{},"hooks":{}}'],
+  ['duplicate-root', '{"hooks":{},"hooks":{}}'],
+  ['duplicate-escaped-root', '{"hooks":{},"\\u0068ooks":{}}'],
+  ['duplicate-handler-key', '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo one","command":"echo two"}]}]}}'],
+  ['null-root', 'null'], ['array-root', '[]'],
+  ['invalid-matcher', '{"hooks":{"PreToolUse":[{"matcher":false,"hooks":[]}]}}'],
+  ['missing-command', '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command"}]}]}}'],
+  ['unknown-handler', '{"hooks":{"PreToolUse":[{"hooks":[{"type":"future-handler"}]}]}}'],
+  ['duplicate-windows-alias', JSON.stringify({ hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: 'printf harmless', commandWindows: null, command_windows: null }] }] } })],
+  ['async-guard', JSON.stringify({ hooks: { PreToolUse: [{ matcher: '^Bash$', hooks: [{ type: 'command', command: 'node agent-guard.mjs', async: true }] }] } })],
+  ['wrong-matcher', JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'node agent-guard.mjs' }] }] } })],
+  ['post-only', JSON.stringify({ hooks: { PostToolUse: [{ hooks: [{ type: 'command', command: 'node agent-guard.mjs' }] }] } })],
+]) {
+  test(`Codex ${label} configuration is refused unchanged even with force`, () => {
+    const target = freshRepo(`codex-${label}`);
+    fs.mkdirSync(path.join(target, '.codex'));
+    const hooks = path.join(target, '.codex/hooks.json');
+    fs.writeFileSync(hooks, content);
+    for (const flags of [[], ['--force']]) {
+      const r = install([...flags, target]);
+      assert.equal(r.status, 2, text(r));
+      assert.equal(fs.readFileSync(hooks, 'utf8'), content);
+      assert.match(r.stdout, /Refused \(never touched\):[\s\S]*\.codex\/hooks\.json/);
+    }
+  });
+}
+
+for (const [field, value] of [
+  ['async', 'false'], ['async', null], ['timeout', 'ten'], ['timeout', -1], ['timeout', 1.5],
+  ['timeout', Number.MAX_SAFE_INTEGER + 1], ['commandWindows', 3], ['command_windows', false],
+  ['statusMessage', []], ['additionalContextLimit', 'many'], ['additionalContextLimit', -1],
+]) {
+  test(`Codex native field ${field}=${JSON.stringify(value)} is refused without rewriting`, () => {
+    const target = freshRepo(`codex-field-${field}-${JSON.stringify(value).replace(/\W/g, '_')}`);
+    fs.mkdirSync(path.join(target, '.codex'));
+    const hooks = path.join(target, '.codex/hooks.json');
+    const original = JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Write', hooks: [
+      { type: 'command', command: 'printf harmless', [field]: value },
+    ] }] } });
+    fs.writeFileSync(hooks, original);
+    for (const flags of [[], ['--force']]) {
+      const r = install([...flags, '--no-hooks-path', target]);
+      assert.equal(r.status, 2, text(r));
+      assert.equal(fs.readFileSync(hooks, 'utf8'), original);
+      assert.match(r.stdout, /Refused \(never touched\):[\s\S]*\.codex\/hooks\.json/);
+    }
+  });
+}
+
+for (const field of ['description', 'matcher', 'command', 'statusMessage', 'commandWindows', 'command_windows']) {
+  test(`Codex refuses unpaired Unicode in ${field} without rewriting`, () => {
+    for (const [index, bad] of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00),
+      String.fromCharCode(0xd800, 0xd800), String.fromCharCode(0xd800, 0x61)].entries()) {
+      const target = freshRepo(`codex-unicode-${field}-${index}`);
+      fs.mkdirSync(path.join(target, '.codex'));
+      const hook = { type: 'command', command: 'printf harmless' };
+      const group = { matcher: 'Write', hooks: [hook] };
+      const config = { description: 'valid', hooks: { PostToolUse: [group] } };
+      if (field === 'description') config.description = bad;
+      else if (field === 'matcher') group.matcher = bad;
+      else hook[field] = `text ${bad}`;
+      const original = JSON.stringify(config);
+      const hooks = path.join(target, '.codex/hooks.json');
+      fs.writeFileSync(hooks, original);
+      for (const flags of [[], ['--force']]) {
+        const r = install([...flags, '--no-hooks-path', target]);
+        assert.equal(r.status, 2, text(r));
+        assert.equal(fs.readFileSync(hooks, 'utf8'), original);
+        assert.match(r.stdout, /unpaired Unicode surrogate/);
+      }
+    }
+  });
+}
+
+test('Codex refuses invalid UTF-8 bytes rather than replacing them during merge', () => {
+  for (const [index, bytes] of [[0x80], [0xed, 0xa0, 0x80], [0xc0, 0xaf], [0xf0, 0x90]].entries()) {
+    const target = freshRepo(`codex-invalid-utf8-${index}`);
+    fs.mkdirSync(path.join(target, '.codex'));
+    const hooks = path.join(target, '.codex/hooks.json');
+    const original = Buffer.concat([Buffer.from('{"description":"'), Buffer.from(bytes), Buffer.from('","hooks":{}}')]);
+    fs.writeFileSync(hooks, original);
+    for (const flags of [[], ['--force']]) {
+      const r = install([...flags, target]);
+      assert.equal(r.status, 2, text(r));
+      assert.ok(fs.readFileSync(hooks).equals(original));
+      assert.match(r.stdout, /Refused \(never touched\):[\s\S]*\.codex\/hooks\.json/);
+    }
+  }
+});
+
+test('Codex rejects Unicode-invalid keys and a file consisting only of invalid bytes', () => {
+  const contents = [Buffer.from([0x80]), Buffer.from(JSON.stringify({ hooks: {
+    [String.fromCharCode(0xd800)]: [],
+  } }))];
+  for (const [index, original] of contents.entries()) {
+    const target = freshRepo(`codex-unicode-key-${index}`);
+    fs.mkdirSync(path.join(target, '.codex'));
+    const hooks = path.join(target, '.codex/hooks.json');
+    fs.writeFileSync(hooks, original);
+    const r = install(['--force', target]);
+    assert.equal(r.status, 2, text(r));
+    assert.ok(fs.readFileSync(hooks).equals(original));
+  }
+});
+
+test('Codex preserves valid Unicode pairs, scalar boundaries and literal escape text', () => {
+  const target = freshRepo('codex-unicode-valid');
+  fs.mkdirSync(path.join(target, '.codex'));
+  const hooks = path.join(target, '.codex/hooks.json');
+  const value = `text ${String.fromCodePoint(0xd7ff, 0xe000, 0xffff, 0x10000, 0x10ffff, 0xfffd)} literal \\ud800`;
+  const original = { description: value, hooks: { PostToolUse: [{ matcher: value, hooks: [
+    { type: 'command', command: value, statusMessage: value, commandWindows: value },
+  ] }] } };
+  // Exercise both raw UTF-8 and JSON-escaped UTF-16 representations.
+  for (const source of [JSON.stringify(original), JSON.stringify(original).replace(/[\u007f-\uffff]/g,
+    (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`)]) {
+    fs.writeFileSync(hooks, source);
+    const r = install([target]);
+    assert.equal(r.status, 0, text(r));
+    const merged = JSON.parse(fs.readFileSync(hooks, 'utf8'));
+    assert.equal(merged.description, original.description);
+    assert.deepEqual(merged.hooks.PostToolUse, original.hooks.PostToolUse);
+  }
+});
+
+for (const description of [null, '', 'Quoted "hooks": {}, [metadata], and Unicode ✓']) {
+  test(`Codex description ${JSON.stringify(description)} and repeated keys in separate handlers remain valid`, () => {
+    const target = freshRepo(`codex-description-valid-${String(description).length}`);
+    fs.mkdirSync(path.join(target, '.codex'));
+    const hooks = path.join(target, '.codex/hooks.json');
+    const original = { description, hooks: { PreToolUse: [{ hooks: [
+      { type: 'command', command: 'printf "{ \\\"command\\\": \\\"example\\\" }"' },
+      { type: 'command', command: 'printf second' },
+    ] }] } };
+    fs.writeFileSync(hooks, JSON.stringify(original));
+    const r = install([target]);
+    assert.equal(r.status, 0, text(r));
+    const merged = JSON.parse(fs.readFileSync(hooks, 'utf8'));
+    assert.equal(merged.description, description);
+    assert.deepEqual(merged.hooks.PreToolUse[0], original.hooks.PreToolUse[0]);
+  });
+}
+
+test('Codex native optional fields and nulls survive a valid registration merge', () => {
+  const target = freshRepo('codex-valid-optionals');
+  fs.mkdirSync(path.join(target, '.codex'));
+  const hooks = path.join(target, '.codex/hooks.json');
+  const original = { hooks: { PreToolUse: [{ hooks: [
+    { type: 'command', command: 'printf harmless', async: false, timeout: 0,
+      command_windows: 'echo harmless', statusMessage: null, additionalContextLimit: 0 },
+    { type: 'command', command: 'printf other', timeout: null, commandWindows: null,
+      statusMessage: 'checking', additionalContextLimit: null },
+  ] }] } };
+  fs.writeFileSync(hooks, JSON.stringify(original));
+  const r = install([target]);
+  assert.equal(r.status, 0, text(r));
+  assert.deepEqual(JSON.parse(fs.readFileSync(hooks, 'utf8')).hooks.PreToolUse[0], original.hooks.PreToolUse[0]);
+});
+
+test('Codex symlink destinations are refused without touching their target', () => {
+  const target = freshRepo('codex-symlink');
+  fs.mkdirSync(path.join(target, '.codex'));
+  const outside = path.join(tmp, 'codex-outside.json');
+  fs.writeFileSync(outside, '{}');
+  fs.symlinkSync(outside, path.join(target, '.codex/hooks.json'));
+  const r = install(['--force', target]);
+  assert.equal(r.status, 2, text(r));
+  assert.equal(fs.readFileSync(outside, 'utf8'), '{}');
 });
 
 test('a hook registered under a different literal is recognised and not duplicated', () => {
@@ -686,7 +917,7 @@ test('the installed guard tests pass inside the target repository', () => {
   // A nested runner must not inherit the parent runner's child-process context variables.
   const nestedEnv = { ...env };
   for (const k of Object.keys(nestedEnv)) if (k.startsWith('NODE_TEST_')) delete nestedEnv[k];
-  const r = spawnSync('node', ['--test', 'tests/agent-guard.test.mjs', 'tests/pre-push-hook.test.mjs', 'tests/agents-status.test.mjs', 'tests/codex-review.test.mjs'],
+  const r = spawnSync('node', ['--test', 'tests/agent-guard.test.mjs', 'tests/pre-push-hook.test.mjs', 'tests/agents-status.test.mjs', 'tests/codex-review.test.mjs', 'tests/codex-hook.test.mjs', 'tests/hermes-agent-guard.test.mjs'],
     { cwd: target, env: nestedEnv, encoding: 'utf8', timeout: 180_000 });
   assert.equal(r.status, 0, text(r));
   assert.match(r.stdout, /fail 0\b/);

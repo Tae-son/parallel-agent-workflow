@@ -5,7 +5,10 @@ agents (Claude Code, Codex, or anything that runs shell commands) work in parall
 branches while one human owns `main`.
 
 It was extracted from a production project where it coordinated multiple agents for weeks.
-Everything here is plain Bash and Node; there are no dependencies to install.
+The core is plain Bash and Node. The optional Hermes adapter uses Python's standard
+library as well. No npm or pip packages are added.
+[Native agent support](docs/agent-support.md) distinguishes
+installed hooks from active guards and documents the runtime-specific gaps.
 
 ## What it gives you
 
@@ -14,6 +17,8 @@ Everything here is plain Bash and Node; there are no dependencies to install.
 | `scripts/land.sh` | The merge gate. Verifies a pull request against GitHub's `main` (CI green on the exact head commit, up to date, no symlinks or submodules), prints a review packet (paths outside the declared scope, gate-file diffs in full, preview link for UI changes), and squash-merges only after the owner types the PR number at the terminal. Re-checks that nothing moved immediately before merging. Refuses to run unless it is byte-identical to the copy on GitHub's `main`. |
 | `scripts/agents-status.sh` | Read-only overview of every Git worktree: branch, age, ahead/behind, dirty and untracked paths, PR state, path overlaps between agents, and the work-in-progress limit. Agents run it before starting. |
 | `.claude/hooks/agent-guard.mjs` | Claude Code `PreToolUse` hook that blocks the common forms of pushing to `main`, force-pushing, merging, writing through `gh api`, and running the owner-only scripts, even inside `bash -c`, `$(...)`, `sudo`, `timeout`, and friends. |
+| `.codex/hooks.json` | Codex native synchronous Bash pre-tool registration using the same checker. Requires owner-reviewed project/hook trust; does not intercept later stdin or fix missing per-command working-directory metadata. |
+| `.hermes/plugins/parallel-agent-guard/` | Hermes native pre-tool plugin adapting local terminal calls to the shared checker. Requires separate activation; arbitrary Python, process stdin and remote execution are not equivalent to guarded terminal calls. |
 | `AGENTS.md` | Short router read at session start by Codex, OpenCode and other agents, and by Claude Code when the repository has no `CLAUDE.md`: points to `CONTRIBUTING.md` and the skill and states the hard rules. The installer leaves an existing `AGENTS.md` alone unless `--force`, and never edits `CLAUDE.md`, `.claude/CLAUDE.md` or `CLAUDE.local.md`; it notes when your `AGENTS.md` needs the kit's rules merged in, or when one of those files exists and does not import `AGENTS.md` (Claude Code then reads it instead). It only checks the repository itself, not a `CLAUDE.md` in a parent directory. |
 | `.claude/skills/parallel-agent-workflow/SKILL.md` | Agent skill that walks an assigned task from brief to pull request (resume, brief, preflight, build, verify, PR), with the points where the agent must stop and ask. It sequences `CONTRIBUTING.md` rather than restating it. An identical copy in `.agents/skills/` serves Codex; OpenCode reads either. Edit both copies together; `install.sh` notes when they differ. Guidance only: it can fail to load, so enforcement stays in the hooks and the gate. |
 | `.githooks/pre-push` | Second layer: blocks any push whose destination ref is `main`, including `other:main`. |
@@ -34,11 +39,16 @@ parallel-agent-workflow/install.sh --owner YOUR_GITHUB_LOGIN /path/to/your/repo
 
 The installer copies files into the repository's working tree, never overwrites an existing
 file unless you pass `--force`, refuses to write through symlinks, merges the Claude hook
-into an existing `.claude/settings.json`, and sets `core.hooksPath=.githooks` in that clone
+into an existing `.claude/settings.json`, merges the Codex registration without granting
+trust, stages the Hermes plugin without enabling it, and sets `core.hooksPath=.githooks` in that clone
 unless another hooks path is already configured or you pass `--no-hooks-path`. It commits
 and pushes nothing. `--no-tests` skips the test files; `--help` lists the options. It exits
 with status 2 when it finished but had to refuse some paths, so scripts can notice a
 partial install; the report lists every path it added, updated, skipped or refused.
+Conflicting or malformed Codex hook definitions are left unchanged and reported as
+refused even with `--force`. Existing `.codex/config.toml` and live agent profiles are
+never edited. Complete the separate [activation checks](docs/agent-support.md) before
+relying on either new integration.
 
 Then, in your repository:
 
@@ -56,8 +66,8 @@ Then, in your repository:
 
 Run the kit's own tests any time with `npm test`. Requirements, for the tests and for the
 scripts themselves: Linux with bash 5, GNU coreutils, sed, awk and grep, Git 2.40 or newer,
-`jq`, the GitHub CLI `gh`, Node 20 or newer, and util-linux `script` for the terminal-driven
-tests.
+`jq`, the GitHub CLI `gh`, Node 20 or newer, Python 3 (`python3`) for Hermes adapter
+tests, and util-linux `script` for the terminal-driven tests.
 
 ## How a change flows
 

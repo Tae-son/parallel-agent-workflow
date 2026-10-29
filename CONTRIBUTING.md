@@ -75,6 +75,17 @@ or Codex. A Claude Code `PreToolUse` hook (`.claude/hooks/agent-guard.mjs`) bloc
 common forms of those commands. Like the pre-push hook, it catches accidents and ordinary
 attempts; it is not a security boundary.
 
+Codex also has a native synchronous `PreToolUse` registration in `.codex/hooks.json`;
+Hermes has a native `pre_tool_call` plugin in `.hermes/plugins/parallel-agent-guard/`.
+Both reuse the unchanged Claude command checker, but neither is activated merely by
+installing the kit. Codex needs project and exact-hook trust; Hermes needs explicit
+plugin enablement on the actual CLI/ACP/gateway surface. Follow
+[`docs/agent-support.md`](docs/agent-support.md) for version references, activation checks,
+and limitations, notably terminal stdin and effective working-directory differences.
+Never grant trust, install into a live profile or disable additional execution tools
+without separate owner approval. These integrations do not weaken independent QA or
+authorise any agent to merge.
+
 **Work-in-progress limit:** at most three active agent branches. Unfinished worktrees are a
 bigger risk than concurrency, so finish or close work before starting more.
 

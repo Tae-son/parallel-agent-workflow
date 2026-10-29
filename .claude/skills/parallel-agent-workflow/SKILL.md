@@ -8,6 +8,11 @@ description: Use for implementation, independent QA, or resuming a task ending i
 `CONTRIBUTING.md` is the rulebook; this skill only sequences it. Read its "Parallel agents"
 section before step 1. Where the two ever disagree, `CONTRIBUTING.md` wins.
 
+Native guard setup and coverage are documented in `docs/agent-support.md`. Claude,
+Codex and Hermes share command policy, not identical execution-path coverage.
+Verify activation on the actual runtime; do not silently enable plugins or trust hooks.
+Hermes can read this file directly when it is not registered in its skill catalogue.
+
 **Always, at every step:**
 
 - The owner merges. Never merge, push to `main`, push with `--force` (only

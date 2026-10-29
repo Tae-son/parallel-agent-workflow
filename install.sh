@@ -13,6 +13,8 @@ Usage: install.sh [--owner GITHUB_LOGIN] [--force] [--no-tests] [--no-hooks-path
 Copies the merge gate, guard hooks, CI workflow, PR template, CONTRIBUTING, AGENTS.md, the
 agent workflow skill (for Claude Code in .claude/skills/ and for Codex in .agents/skills/)
 and the kit's tests into TARGET_DIR, which must be the top level of a Git repository.
+Also stages Codex hook registration and the Hermes project plugin, without activating
+either runtime. See docs/agent-support.md for owner-reviewed activation and coverage.
 
   --owner LOGIN     write .github/CODEOWNERS as "* @LOGIN" (otherwise a placeholder)
   --force           overwrite existing regular files (symlinks, hard links to other files,
@@ -21,8 +23,9 @@ and the kit's tests into TARGET_DIR, which must be the top level of a Git reposi
   --no-hooks-path   do not set core.hooksPath=.githooks in the target
   -h, --help        show this help
 
-Existing files are left alone unless --force. .claude/settings.json is merged so the
-agent-guard hook is registered without dropping existing hooks. core.hooksPath is set in the
+Existing files are left alone unless --force. .claude/settings.json and .codex/hooks.json
+are merged without dropping existing hooks. Conflicting Codex registrations are refused
+even with --force. No user-level config or trust records are written. core.hooksPath is set in the
 clone's local config only when it is not already set there. Exit status: 0 when everything
 requested was done, 1 when nothing was written because of a refused argument or state,
 2 when the run completed but some paths were refused (see the report).
@@ -62,6 +65,9 @@ if (( OWNER_SET )); then
 fi
 
 FILES=(
+  docs/agent-support.md
+  .hermes/plugins/parallel-agent-guard/plugin.yaml
+  .hermes/plugins/parallel-agent-guard/__init__.py
   scripts/land.sh
   scripts/codex-review.sh
   scripts/agents-status.sh
@@ -80,6 +86,8 @@ FILES=(
   CONTRIBUTING.md
 )
 TEST_FILES=(
+  tests/codex-hook.test.mjs
+  tests/hermes-agent-guard.test.mjs
   tests/agent-guard.test.mjs
   tests/agent-skill.test.mjs
   tests/agents-status.test.mjs
@@ -90,7 +98,7 @@ TEST_FILES=(
 )
 EXEC=(scripts/land.sh scripts/codex-review.sh scripts/agents-status.sh .githooks/pre-push .claude/hooks/agent-guard.mjs)
 (( TESTS )) && FILES+=("${TEST_FILES[@]}")
-for f in "${FILES[@]}" .claude/settings.json; do
+for f in "${FILES[@]}" .claude/settings.json .codex/hooks.json; do
   [ -f "$KIT/$f" ] || die "kit file missing: $f (incomplete checkout of the kit at $KIT)"
 done
 
@@ -150,6 +158,10 @@ put() { # relative path, source file
   if [ -e "$dst" ]; then write_file "$rel" "$src" force; else write_file "$rel" "$src" add; fi
 }
 for f in "${FILES[@]}"; do put "$f" "$KIT/$f"; done
+guard=.claude/hooks/agent-guard.mjs
+if [ -z "$(path_problem "$guard")" ] && [ -f "$TARGET/$guard" ] && ! cmp -s -- "$TARGET/$guard" "$KIT/$guard"; then
+  notes+=('shared command checker differs from the kit; Claude/Codex/Hermes policy behavior is unverified until the preserved checker is reviewed')
+fi
 # Claude Code reads .claude/skills/ and Codex reads .agents/skills/; the two copies must match.
 sk=skills/parallel-agent-workflow/SKILL.md
 if [ -f "$TARGET/.claude/$sk" ] && [ -f "$TARGET/.agents/$sk" ] && ! cmp -s -- "$TARGET/.claude/$sk" "$TARGET/.agents/$sk"; then
@@ -259,6 +271,119 @@ JS
     present) skipped+=("$st_rel (agent-guard hook already registered)") ;;
     *) refused+=("$st_rel (${merged#unsupported: }; register the hook by hand, see .claude/settings.json in the kit)") ;;
   esac
+fi
+
+# ---- Codex: install/merge registration, never grant project or hook trust. ----
+cx_rel=.codex/hooks.json cx=$TARGET/.codex/hooks.json
+why=$(path_problem "$cx_rel")
+if [ -n "$why" ]; then refused+=("$cx_rel ($why)")
+elif [ ! -e "$cx" ] || ! LC_ALL=C grep -aq '[^[:space:]]' "$cx"; then
+  write_file "$cx_rel" "$KIT/.codex/hooks.json" add
+else
+  merged=$(node - "$cx" "$KIT/.codex/hooks.json" <<'JS' || echo error
+const fs = require('node:fs');
+const { isDeepStrictEqual, TextDecoder } = require('node:util');
+const [file, template] = process.argv.slice(2);
+const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
+// JSON.parse loses duplicate keys and permits lone UTF-16 surrogates that native
+// Rust String parsing rejects. Check every decoded string token, including keys.
+// Tokenize only after JSON syntax validation; retain one key set per object.
+function validateJsonTokens(text) {
+  const stack = [];
+  for (const token of text.match(/"(?:\\.|[^"\\])*"|[{}\[\],:]|true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g) ?? []) {
+    const frame = stack.at(-1);
+    if (token === '{') stack.push({ keys: new Set(), key: true });
+    else if (token === '[') stack.push(null);
+    else if (token === '}' || token === ']') stack.pop();
+    else if (token === ',' && frame) frame.key = true;
+    else if (token.startsWith('"')) {
+      const value = JSON.parse(token);
+      for (let i = 0; i < value.length; i++) {
+        const unit = value.charCodeAt(i);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = value.charCodeAt(++i);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error('unpaired Unicode surrogate');
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) throw new Error('unpaired Unicode surrogate');
+      }
+      if (frame?.key) {
+        if (frame.keys.has(value)) throw new Error(`duplicate JSON key: ${value}`);
+        frame.keys.add(value);
+        frame.key = false;
+      }
+    }
+  }
+}
+try {
+  // Refuse invalid source bytes instead of silently replacing them with U+FFFD.
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(file)).replace(/^\uFEFF/, '');
+  const s = JSON.parse(text);
+  validateJsonTokens(text);
+  const wanted = JSON.parse(fs.readFileSync(template, 'utf8')).hooks.PreToolUse[0];
+  if (!isObj(s)) throw new Error('not an object');
+  // HooksFile denies unknown root fields; valid handlers cannot rescue a source
+  // whose metadata prevents the native runtime from deserializing the file.
+  if (Object.keys(s).some((key) => key !== 'description' && key !== 'hooks')) throw new Error('unknown root field');
+  if (s.description !== undefined && s.description !== null && typeof s.description !== 'string') {
+    throw new Error('description must be a string or null');
+  }
+  if (s.hooks !== undefined && !isObj(s.hooks)) throw new Error('hooks is not an object');
+  for (const [event, groups] of Object.entries(s.hooks ?? {})) {
+    if (!Array.isArray(groups)) throw new Error(`${event} is not an array`);
+    for (const group of groups) {
+      if (!isObj(group) || !Array.isArray(group.hooks)) throw new Error(`unsupported ${event} group`);
+      if (group.matcher !== undefined && typeof group.matcher !== 'string') throw new Error(`unsupported ${event} matcher`);
+      for (const hook of group.hooks) {
+        if (!isObj(hook)) throw new Error(`unsupported ${event} handler`);
+        if (hook.type !== 'command' || typeof hook.command !== 'string' || !hook.command.trim()) {
+          throw new Error('automatic merge supports command handlers only; reconcile other forms manually');
+        }
+        // Match recognized command fields in Codex rust-v0.165.0 protocol/hooks.rs.
+        // Bad fields anywhere can make native discovery reject the entire source.
+        if (hook.async !== undefined && typeof hook.async !== 'boolean') throw new Error('async must be boolean');
+        for (const key of ['commandWindows', 'command_windows', 'statusMessage']) {
+          if (hook[key] !== undefined && hook[key] !== null && typeof hook[key] !== 'string') {
+            throw new Error(`${key} must be a string or null`);
+          }
+        }
+        if (Object.hasOwn(hook, 'commandWindows') && Object.hasOwn(hook, 'command_windows')) {
+          throw new Error('duplicate commandWindows/command_windows alias');
+        }
+        for (const key of ['timeout', 'additionalContextLimit']) {
+          if (hook[key] !== undefined && hook[key] !== null && (!Number.isSafeInteger(hook[key]) || hook[key] < 0)) {
+            throw new Error(`${key} must be a nonnegative safe integer or null`);
+          }
+        }
+        if (typeof hook.command === 'string' && hook.command.includes('agent-guard.mjs')) {
+          if (event !== 'PreToolUse' || group.matcher !== wanted.matcher || !isDeepStrictEqual(hook, wanted.hooks[0])) {
+            throw new Error('existing agent-guard registration differs; review it manually (even with --force)');
+          }
+        }
+      }
+    }
+  }
+  const present = (s.hooks?.PreToolUse ?? []).some((group) => group.matcher === wanted.matcher
+    && group.hooks.some((hook) => isDeepStrictEqual(hook, wanted.hooks[0])));
+  if (present) { console.log('present'); process.exit(0); }
+  s.hooks ??= {};
+  s.hooks.PreToolUse ??= [];
+  s.hooks.PreToolUse.push(wanted);
+  const tmp = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tmp, `${JSON.stringify(s, null, 2)}\n`, { mode: fs.statSync(file).mode & 0o777 });
+  fs.renameSync(tmp, file);
+  console.log('merged');
+} catch (e) { console.log(`unsupported: ${e.message}`); }
+JS
+)
+  case $merged in
+    merged) updated+=("$cx_rel (synchronous PreToolUse hook added; existing hooks preserved)") ;;
+    present) skipped+=("$cx_rel (matching agent-guard registration already present)") ;;
+    *) refused+=("$cx_rel (${merged#unsupported: }; no trust or configuration changed)") ;;
+  esac
+fi
+notes+=('Codex guard is not activated by this installer: in a supported Codex runtime, trust the project and review/trust this exact hook via /hooks; inspect enabled/trust status before use')
+notes+=('Hermes project-only plugin is not activated by this installer: review docs/agent-support.md; project discovery requires explicit opt-in and process cwd at the repository root; profile copies are unsupported')
+if [ -e "$TARGET/.codex/config.toml" ]; then
+  notes+=('.codex/config.toml was not changed; inspect any inline [hooks] definitions because Codex combines them with hooks.json')
 fi
 
 # ---- core.hooksPath: repository-level config only (local file, its includes, worktree config). ----

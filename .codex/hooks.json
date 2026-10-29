@@ -1,0 +1,17 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^Bash$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "root=$(git rev-parse --show-toplevel) || { printf '%s\\n' 'agent-guard unavailable: cannot resolve repository' >&2; exit 2; }; git -C \"$root\" branch --show-current >/dev/null || { printf '%s\\n' 'agent-guard unavailable: cannot inspect repository branch' >&2; exit 2; }; node \"$root/.claude/hooks/agent-guard.mjs\"; rc=$?; case $rc in 0|2) exit \"$rc\" ;; *) printf '%s\\n' 'agent-guard unavailable: command check failed' >&2; exit 2 ;; esac",
+            "async": false,
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}
