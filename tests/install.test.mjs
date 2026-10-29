@@ -33,6 +33,10 @@ before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'install-test-')); })
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
 
 const EXPECTED = [
+  '.hermes/plugins/parallel-agent-guard/plugin.yaml',
+  '.hermes/plugins/parallel-agent-guard/__init__.py', 'tests/hermes-agent-guard.test.mjs',
+  'docs/agent-support.md',
+  '.codex/hooks.json', 'tests/codex-hook.test.mjs',
   'scripts/land.sh', 'scripts/codex-review.sh', 'scripts/agents-status.sh', 'scripts/gate-files.txt',
   'scripts/ui-paths.txt', 'scripts/risky-paths.txt', 'scripts/codex-exclude.txt', 'scripts/codex-review-contract.md',
   '.githooks/pre-push', '.github/pull_request_template.md', '.github/workflows/ci.yml', '.github/CODEOWNERS',
@@ -66,6 +70,35 @@ test('installs every kit file into a fresh repository, byte-identical, executabl
   assert.match(r.stdout, /independent QA/);
   assert.match(fs.readFileSync(path.join(target, 'CONTRIBUTING.md'), 'utf8'), /## Independent QA/);
   assert.match(fs.readFileSync(path.join(target, '.github/pull_request_template.md'), 'utf8'), /```independent-qa/);
+});
+
+test('a preserved customised command guard is explicitly reported as unverified', () => {
+  const target = freshRepo('custom-command-guard');
+  fs.mkdirSync(path.join(target, '.claude/hooks'), { recursive: true });
+  const guard = path.join(target, '.claude/hooks/agent-guard.mjs');
+  fs.writeFileSync(guard, '// custom checker\n');
+  const r = install([target]);
+  assert.equal(r.status, 0, text(r));
+  assert.equal(fs.readFileSync(guard, 'utf8'), '// custom checker\n');
+  assert.match(r.stdout, /shared command checker differs.*unverified/);
+});
+
+test('Hermes plugin is staged without changing project configuration or profile state', () => {
+  const target = freshRepo('hermes-staged');
+  fs.mkdirSync(path.join(target, '.hermes'));
+  const projectConfig = '# existing owner configuration\nplugins:\n  enabled: []\n';
+  fs.writeFileSync(path.join(target, '.hermes/config.yaml'), projectConfig);
+  const profile = path.join(tmp, 'hermes-profile');
+  fs.mkdirSync(profile);
+  fs.writeFileSync(path.join(profile, 'config.yaml'), projectConfig);
+  const r = spawnSync(installer, [target], { cwd: root, env: { ...env, HERMES_HOME: profile }, encoding: 'utf8' });
+  assert.equal(r.status, 0, text(r));
+  assert.ok(fs.existsSync(path.join(target, '.hermes/plugins/parallel-agent-guard/__init__.py')));
+  assert.equal(fs.readFileSync(path.join(target, '.hermes/config.yaml'), 'utf8'), projectConfig);
+  assert.equal(fs.readFileSync(path.join(profile, 'config.yaml'), 'utf8'), projectConfig);
+  assert.deepEqual(fs.readdirSync(profile), ['config.yaml']);
+  assert.match(r.stdout, /Hermes.*not activated/);
+  assert.match(r.stdout, /project-only/);
 });
 
 test('a kept, customised skill copy that differs from the other copy is reported', () => {
@@ -227,6 +260,65 @@ test('an existing .claude/settings.json keeps its hooks and gains the agent-guar
   assert.match(r.stdout, /hook already registered/);
   assert.doesNotMatch(r.stdout, /Overwritten/);
   assert.equal(JSON.parse(fs.readFileSync(path.join(target, '.claude/settings.json'), 'utf8')).hooks.PreToolUse.length, 2);
+});
+
+test('Codex hooks merge once, preserve other hooks and leave trust/config files untouched', () => {
+  const target = freshRepo('codex-settings');
+  fs.mkdirSync(path.join(target, '.codex'));
+  const config = '# Owner configuration\n[hooks]\n# Inline hooks need separate review\n';
+  fs.writeFileSync(path.join(target, '.codex/config.toml'), config);
+  const existing = { description: 'keep', hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'keep-me' }] }] } };
+  const hooks = path.join(target, '.codex/hooks.json');
+  fs.writeFileSync(hooks, JSON.stringify(existing), { mode: 0o600 });
+  for (let n = 0; n < 2; n++) {
+    const r = install(['--owner', 'someone', target]);
+    assert.equal(r.status, 0, text(r));
+    const merged = JSON.parse(fs.readFileSync(hooks, 'utf8'));
+    assert.equal(merged.description, 'keep');
+    assert.deepEqual(merged.hooks.PreToolUse[0], existing.hooks.PreToolUse[0]);
+    assert.equal(merged.hooks.PreToolUse.length, 2);
+    assert.deepEqual(merged.hooks.PreToolUse[1], JSON.parse(fs.readFileSync(path.join(root, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0]);
+    assert.equal(fs.statSync(hooks).mode & 0o777, 0o600);
+    assert.equal(fs.readFileSync(path.join(target, '.codex/config.toml'), 'utf8'), config);
+    assert.match(r.stdout, /Codex.*not activated/);
+    assert.match(r.stdout, /\/hooks/);
+    assert.match(r.stdout, /inline/);
+  }
+});
+
+for (const [label, content] of [
+  ['malformed', '{broken'], ['wrong-event-shape', '{"hooks":{"PreToolUse":{}}}'],
+  ['null-root', 'null'], ['array-root', '[]'],
+  ['invalid-matcher', '{"hooks":{"PreToolUse":[{"matcher":false,"hooks":[]}]}}'],
+  ['missing-command', '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command"}]}]}}'],
+  ['unknown-handler', '{"hooks":{"PreToolUse":[{"hooks":[{"type":"future-handler"}]}]}}'],
+  ['async-guard', JSON.stringify({ hooks: { PreToolUse: [{ matcher: '^Bash$', hooks: [{ type: 'command', command: 'node agent-guard.mjs', async: true }] }] } })],
+  ['wrong-matcher', JSON.stringify({ hooks: { PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'node agent-guard.mjs' }] }] } })],
+  ['post-only', JSON.stringify({ hooks: { PostToolUse: [{ hooks: [{ type: 'command', command: 'node agent-guard.mjs' }] }] } })],
+]) {
+  test(`Codex ${label} configuration is refused unchanged even with force`, () => {
+    const target = freshRepo(`codex-${label}`);
+    fs.mkdirSync(path.join(target, '.codex'));
+    const hooks = path.join(target, '.codex/hooks.json');
+    fs.writeFileSync(hooks, content);
+    for (const flags of [[], ['--force']]) {
+      const r = install([...flags, target]);
+      assert.equal(r.status, 2, text(r));
+      assert.equal(fs.readFileSync(hooks, 'utf8'), content);
+      assert.match(r.stdout, /Refused \(never touched\):[\s\S]*\.codex\/hooks\.json/);
+    }
+  });
+}
+
+test('Codex symlink destinations are refused without touching their target', () => {
+  const target = freshRepo('codex-symlink');
+  fs.mkdirSync(path.join(target, '.codex'));
+  const outside = path.join(tmp, 'codex-outside.json');
+  fs.writeFileSync(outside, '{}');
+  fs.symlinkSync(outside, path.join(target, '.codex/hooks.json'));
+  const r = install(['--force', target]);
+  assert.equal(r.status, 2, text(r));
+  assert.equal(fs.readFileSync(outside, 'utf8'), '{}');
 });
 
 test('a hook registered under a different literal is recognised and not duplicated', () => {
@@ -686,7 +778,7 @@ test('the installed guard tests pass inside the target repository', () => {
   // A nested runner must not inherit the parent runner's child-process context variables.
   const nestedEnv = { ...env };
   for (const k of Object.keys(nestedEnv)) if (k.startsWith('NODE_TEST_')) delete nestedEnv[k];
-  const r = spawnSync('node', ['--test', 'tests/agent-guard.test.mjs', 'tests/pre-push-hook.test.mjs', 'tests/agents-status.test.mjs', 'tests/codex-review.test.mjs'],
+  const r = spawnSync('node', ['--test', 'tests/agent-guard.test.mjs', 'tests/pre-push-hook.test.mjs', 'tests/agents-status.test.mjs', 'tests/codex-review.test.mjs', 'tests/codex-hook.test.mjs', 'tests/hermes-agent-guard.test.mjs'],
     { cwd: target, env: nestedEnv, encoding: 'utf8', timeout: 180_000 });
   assert.equal(r.status, 0, text(r));
   assert.match(r.stdout, /fail 0\b/);

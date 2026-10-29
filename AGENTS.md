@@ -12,4 +12,7 @@ before changing anything. It is the rulebook, and it wins wherever this file is 
 - Never merge, push to `main`, push with `--force` (`--force-with-lease` on your own branch
   only), or run `scripts/land.sh`, `scripts/codex-review.sh` or `codex`.
 - For the step-by-step procedure and when to stop and ask, use the `parallel-agent-workflow`
-  skill (`.claude/skills/` for Claude Code, `.agents/skills/` for Codex).
+  skill (`.claude/skills/` for Claude Code, `.agents/skills/` for Codex; Hermes can read the
+  latter file directly). See `docs/agent-support.md` for native guard activation and gaps.
+  Installed files do not prove an active guard. Report missing activation; do not grant
+  hook trust or change live profiles without owner approval.

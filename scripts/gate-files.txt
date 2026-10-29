@@ -10,6 +10,8 @@ scripts/*
 .githooks/*
 .claude/*
 .agents/*
+.codex/*
+.hermes/*
 CLAUDE.md
 */CLAUDE.md
 AGENTS.md
