@@ -288,6 +288,12 @@ test('Codex hooks merge once, preserve other hooks and leave trust/config files 
 
 for (const [label, content] of [
   ['malformed', '{broken'], ['wrong-event-shape', '{"hooks":{"PreToolUse":{}}}'],
+  ...[[], 3, {}, false].map((description, index) => [`bad-description-${index}`, JSON.stringify({ description, hooks: {} })]),
+  ['unknown-root-version', '{"version":1,"hooks":{}}'],
+  ['unknown-root-state', '{"state":{},"hooks":{}}'],
+  ['duplicate-root', '{"hooks":{},"hooks":{}}'],
+  ['duplicate-escaped-root', '{"hooks":{},"\\u0068ooks":{}}'],
+  ['duplicate-handler-key', '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command","command":"echo one","command":"echo two"}]}]}}'],
   ['null-root', 'null'], ['array-root', '[]'],
   ['invalid-matcher', '{"hooks":{"PreToolUse":[{"matcher":false,"hooks":[]}]}}'],
   ['missing-command', '{"hooks":{"PreToolUse":[{"hooks":[{"type":"command"}]}]}}'],
@@ -330,6 +336,24 @@ for (const [field, value] of [
       assert.equal(fs.readFileSync(hooks, 'utf8'), original);
       assert.match(r.stdout, /Refused \(never touched\):[\s\S]*\.codex\/hooks\.json/);
     }
+  });
+}
+
+for (const description of [null, '', 'Quoted "hooks": {}, [metadata], and Unicode ✓']) {
+  test(`Codex description ${JSON.stringify(description)} and repeated keys in separate handlers remain valid`, () => {
+    const target = freshRepo(`codex-description-valid-${String(description).length}`);
+    fs.mkdirSync(path.join(target, '.codex'));
+    const hooks = path.join(target, '.codex/hooks.json');
+    const original = { description, hooks: { PreToolUse: [{ hooks: [
+      { type: 'command', command: 'printf "{ \\\"command\\\": \\\"example\\\" }"' },
+      { type: 'command', command: 'printf second' },
+    ] }] } };
+    fs.writeFileSync(hooks, JSON.stringify(original));
+    const r = install([target]);
+    assert.equal(r.status, 0, text(r));
+    const merged = JSON.parse(fs.readFileSync(hooks, 'utf8'));
+    assert.equal(merged.description, description);
+    assert.deepEqual(merged.hooks.PreToolUse[0], original.hooks.PreToolUse[0]);
   });
 }
 

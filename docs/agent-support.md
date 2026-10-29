@@ -38,6 +38,10 @@ it. No production profile or trust record is changed by these tests.
    Recognized optional command fields are type-checked against the reference API;
    numeric fields must be nonnegative JavaScript-safe integers (or native optional
    nulls), so the installer does not round large timeout/context-limit values.
+   The native root schema accepts only `description` (string or null) and `hooks`.
+   Unknown root fields and duplicate JSON keys are refused before merging rather
+   than silently discarded or normalized. Review the complete source, not only
+   this kit's added handler: an invalid source can prevent every hook in it loading.
 4. Confirm this hook is enabled and trusted for the intended working directory.
    App-server clients can inspect `hooks/list` for that directory; check `enabled`,
    `trustStatus`, source path, current hash, and discovery diagnostics. Merely seeing
@@ -152,5 +156,6 @@ rulesets for server-side enforcement, and OS isolation for stronger containment.
 - [Codex exec hook payload, v0.165.0](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/tools/handlers/unified_exec/exec_command.rs)
 - [Codex stdin exclusion, v0.165.0](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/tools/handlers/unified_exec/write_stdin.rs)
 - [Codex command-handler field types, v0.165.0](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/protocol/src/hooks.rs)
+- [Codex hook-file root schema, v0.165.0](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/config/src/hook_config.rs)
 - [Hermes plugin development](https://hermes-agent.nousresearch.com/docs/developer-guide/plugins/)
 - [Hermes event hooks](https://hermes-agent.nousresearch.com/docs/user-guide/features/hooks)

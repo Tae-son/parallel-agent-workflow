@@ -285,10 +285,36 @@ const fs = require('node:fs');
 const { isDeepStrictEqual } = require('node:util');
 const [file, template] = process.argv.slice(2);
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
+// JSON.parse loses duplicate keys before schema validation. Tokenize only after
+// it validates JSON syntax, retaining one key set per object (including escapes).
+function rejectDuplicateKeys(text) {
+  const stack = [];
+  for (const token of text.match(/"(?:\\.|[^"\\])*"|[{}\[\],:]|true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g) ?? []) {
+    const frame = stack.at(-1);
+    if (token === '{') stack.push({ keys: new Set(), key: true });
+    else if (token === '[') stack.push(null);
+    else if (token === '}' || token === ']') stack.pop();
+    else if (token === ',' && frame) frame.key = true;
+    else if (token.startsWith('"') && frame?.key) {
+      const key = JSON.parse(token);
+      if (frame.keys.has(key)) throw new Error(`duplicate JSON key: ${key}`);
+      frame.keys.add(key);
+      frame.key = false;
+    }
+  }
+}
 try {
-  const s = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, ''));
+  const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+  const s = JSON.parse(text);
+  rejectDuplicateKeys(text);
   const wanted = JSON.parse(fs.readFileSync(template, 'utf8')).hooks.PreToolUse[0];
   if (!isObj(s)) throw new Error('not an object');
+  // HooksFile denies unknown root fields; valid handlers cannot rescue a source
+  // whose metadata prevents the native runtime from deserializing the file.
+  if (Object.keys(s).some((key) => key !== 'description' && key !== 'hooks')) throw new Error('unknown root field');
+  if (s.description !== undefined && s.description !== null && typeof s.description !== 'string') {
+    throw new Error('description must be a string or null');
+  }
   if (s.hooks !== undefined && !isObj(s.hooks)) throw new Error('hooks is not an object');
   for (const [event, groups] of Object.entries(s.hooks ?? {})) {
     if (!Array.isArray(groups)) throw new Error(`${event} is not an array`);
