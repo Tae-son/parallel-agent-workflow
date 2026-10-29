@@ -277,17 +277,18 @@ fi
 cx_rel=.codex/hooks.json cx=$TARGET/.codex/hooks.json
 why=$(path_problem "$cx_rel")
 if [ -n "$why" ]; then refused+=("$cx_rel ($why)")
-elif [ ! -e "$cx" ] || ! grep -q '[^[:space:]]' "$cx"; then
+elif [ ! -e "$cx" ] || ! LC_ALL=C grep -aq '[^[:space:]]' "$cx"; then
   write_file "$cx_rel" "$KIT/.codex/hooks.json" add
 else
   merged=$(node - "$cx" "$KIT/.codex/hooks.json" <<'JS' || echo error
 const fs = require('node:fs');
-const { isDeepStrictEqual } = require('node:util');
+const { isDeepStrictEqual, TextDecoder } = require('node:util');
 const [file, template] = process.argv.slice(2);
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
-// JSON.parse loses duplicate keys before schema validation. Tokenize only after
-// it validates JSON syntax, retaining one key set per object (including escapes).
-function rejectDuplicateKeys(text) {
+// JSON.parse loses duplicate keys and permits lone UTF-16 surrogates that native
+// Rust String parsing rejects. Check every decoded string token, including keys.
+// Tokenize only after JSON syntax validation; retain one key set per object.
+function validateJsonTokens(text) {
   const stack = [];
   for (const token of text.match(/"(?:\\.|[^"\\])*"|[{}\[\],:]|true|false|null|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?/g) ?? []) {
     const frame = stack.at(-1);
@@ -295,18 +296,28 @@ function rejectDuplicateKeys(text) {
     else if (token === '[') stack.push(null);
     else if (token === '}' || token === ']') stack.pop();
     else if (token === ',' && frame) frame.key = true;
-    else if (token.startsWith('"') && frame?.key) {
-      const key = JSON.parse(token);
-      if (frame.keys.has(key)) throw new Error(`duplicate JSON key: ${key}`);
-      frame.keys.add(key);
-      frame.key = false;
+    else if (token.startsWith('"')) {
+      const value = JSON.parse(token);
+      for (let i = 0; i < value.length; i++) {
+        const unit = value.charCodeAt(i);
+        if (unit >= 0xd800 && unit <= 0xdbff) {
+          const next = value.charCodeAt(++i);
+          if (!(next >= 0xdc00 && next <= 0xdfff)) throw new Error('unpaired Unicode surrogate');
+        } else if (unit >= 0xdc00 && unit <= 0xdfff) throw new Error('unpaired Unicode surrogate');
+      }
+      if (frame?.key) {
+        if (frame.keys.has(value)) throw new Error(`duplicate JSON key: ${value}`);
+        frame.keys.add(value);
+        frame.key = false;
+      }
     }
   }
 }
 try {
-  const text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+  // Refuse invalid source bytes instead of silently replacing them with U+FFFD.
+  const text = new TextDecoder('utf-8', { fatal: true }).decode(fs.readFileSync(file)).replace(/^\uFEFF/, '');
   const s = JSON.parse(text);
-  rejectDuplicateKeys(text);
+  validateJsonTokens(text);
   const wanted = JSON.parse(fs.readFileSync(template, 'utf8')).hooks.PreToolUse[0];
   if (!isObj(s)) throw new Error('not an object');
   // HooksFile denies unknown root fields; valid handlers cannot rescue a source

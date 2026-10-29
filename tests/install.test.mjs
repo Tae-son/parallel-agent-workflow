@@ -339,6 +339,82 @@ for (const [field, value] of [
   });
 }
 
+for (const field of ['description', 'matcher', 'command', 'statusMessage', 'commandWindows', 'command_windows']) {
+  test(`Codex refuses unpaired Unicode in ${field} without rewriting`, () => {
+    for (const [index, bad] of [String.fromCharCode(0xd800), String.fromCharCode(0xdc00),
+      String.fromCharCode(0xd800, 0xd800), String.fromCharCode(0xd800, 0x61)].entries()) {
+      const target = freshRepo(`codex-unicode-${field}-${index}`);
+      fs.mkdirSync(path.join(target, '.codex'));
+      const hook = { type: 'command', command: 'printf harmless' };
+      const group = { matcher: 'Write', hooks: [hook] };
+      const config = { description: 'valid', hooks: { PostToolUse: [group] } };
+      if (field === 'description') config.description = bad;
+      else if (field === 'matcher') group.matcher = bad;
+      else hook[field] = `text ${bad}`;
+      const original = JSON.stringify(config);
+      const hooks = path.join(target, '.codex/hooks.json');
+      fs.writeFileSync(hooks, original);
+      for (const flags of [[], ['--force']]) {
+        const r = install([...flags, '--no-hooks-path', target]);
+        assert.equal(r.status, 2, text(r));
+        assert.equal(fs.readFileSync(hooks, 'utf8'), original);
+        assert.match(r.stdout, /unpaired Unicode surrogate/);
+      }
+    }
+  });
+}
+
+test('Codex refuses invalid UTF-8 bytes rather than replacing them during merge', () => {
+  for (const [index, bytes] of [[0x80], [0xed, 0xa0, 0x80], [0xc0, 0xaf], [0xf0, 0x90]].entries()) {
+    const target = freshRepo(`codex-invalid-utf8-${index}`);
+    fs.mkdirSync(path.join(target, '.codex'));
+    const hooks = path.join(target, '.codex/hooks.json');
+    const original = Buffer.concat([Buffer.from('{"description":"'), Buffer.from(bytes), Buffer.from('","hooks":{}}')]);
+    fs.writeFileSync(hooks, original);
+    for (const flags of [[], ['--force']]) {
+      const r = install([...flags, target]);
+      assert.equal(r.status, 2, text(r));
+      assert.ok(fs.readFileSync(hooks).equals(original));
+      assert.match(r.stdout, /Refused \(never touched\):[\s\S]*\.codex\/hooks\.json/);
+    }
+  }
+});
+
+test('Codex rejects Unicode-invalid keys and a file consisting only of invalid bytes', () => {
+  const contents = [Buffer.from([0x80]), Buffer.from(JSON.stringify({ hooks: {
+    [String.fromCharCode(0xd800)]: [],
+  } }))];
+  for (const [index, original] of contents.entries()) {
+    const target = freshRepo(`codex-unicode-key-${index}`);
+    fs.mkdirSync(path.join(target, '.codex'));
+    const hooks = path.join(target, '.codex/hooks.json');
+    fs.writeFileSync(hooks, original);
+    const r = install(['--force', target]);
+    assert.equal(r.status, 2, text(r));
+    assert.ok(fs.readFileSync(hooks).equals(original));
+  }
+});
+
+test('Codex preserves valid Unicode pairs, scalar boundaries and literal escape text', () => {
+  const target = freshRepo('codex-unicode-valid');
+  fs.mkdirSync(path.join(target, '.codex'));
+  const hooks = path.join(target, '.codex/hooks.json');
+  const value = `text ${String.fromCodePoint(0xd7ff, 0xe000, 0xffff, 0x10000, 0x10ffff, 0xfffd)} literal \\ud800`;
+  const original = { description: value, hooks: { PostToolUse: [{ matcher: value, hooks: [
+    { type: 'command', command: value, statusMessage: value, commandWindows: value },
+  ] }] } };
+  // Exercise both raw UTF-8 and JSON-escaped UTF-16 representations.
+  for (const source of [JSON.stringify(original), JSON.stringify(original).replace(/[\u007f-\uffff]/g,
+    (unit) => `\\u${unit.charCodeAt(0).toString(16).padStart(4, '0')}`)]) {
+    fs.writeFileSync(hooks, source);
+    const r = install([target]);
+    assert.equal(r.status, 0, text(r));
+    const merged = JSON.parse(fs.readFileSync(hooks, 'utf8'));
+    assert.equal(merged.description, original.description);
+    assert.deepEqual(merged.hooks.PostToolUse, original.hooks.PostToolUse);
+  }
+});
+
 for (const description of [null, '', 'Quoted "hooks": {}, [metadata], and Unicode ✓']) {
   test(`Codex description ${JSON.stringify(description)} and repeated keys in separate handlers remain valid`, () => {
     const target = freshRepo(`codex-description-valid-${String(description).length}`);

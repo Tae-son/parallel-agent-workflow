@@ -42,6 +42,9 @@ it. No production profile or trust record is changed by these tests.
    Unknown root fields and duplicate JSON keys are refused before merging rather
    than silently discarded or normalized. Review the complete source, not only
    this kit's added handler: an invalid source can prevent every hook in it loading.
+   Invalid UTF-8 bytes and unpaired Unicode surrogate escapes in strings or keys
+   are refused unchanged. Valid Unicode, including supplementary characters and
+   literal backslash escape text, is preserved rather than sanitized or replaced.
 4. Confirm this hook is enabled and trusted for the intended working directory.
    App-server clients can inspect `hooks/list` for that directory; check `enabled`,
    `trustStatus`, source path, current hash, and discovery diagnostics. Merely seeing
@@ -123,6 +126,11 @@ or execute the submitted command merely to inspect it.
 
 Run `npm run verify`. Focused adapter checks are
 `node --test tests/codex-hook.test.mjs tests/hermes-agent-guard.test.mjs`.
+For strictly local Git fixtures, use
+`GIT_ALLOW_PROTOCOL=file GIT_TERMINAL_PROMPT=0 npm run verify`. The existing
+mismatched-origin merge-gate test otherwise attempts a deliberately failing fetch
+and can wait on a network credential prompt. This test-only environment does not
+alter repository configuration or the runtime guards.
 The existing Claude policy corpus remains part of verification. Installer checks
 cover repeat installs, preservation, conflicting registrations, and unsafe paths.
 Synthetic success must be reported separately from a native runtime smoke test.
