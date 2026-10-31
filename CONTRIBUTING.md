@@ -92,8 +92,9 @@ owner explicitly approves the exact test and its isolation boundaries. They must
 `scripts/codex-smoke.sh`; direct `codex` invocation remains prohibited. The runner requires
 a marked disposable root, a clean standalone Git repository with no remotes, isolated
 `HOME` and `CODEX_HOME`, a harmless `gh` stub and a scrubbed child environment. It refuses
-known sandbox-bypass flags. Its `--owner-approved` declaration is procedural evidence, not
-authenticated consent, so the owner's written approval remains the authority.
+known sandbox and hook-trust bypass forms, unsafe Codex config, remote-capable Git config,
+and symlinks in isolated state. Its `--owner-approved` declaration is procedural evidence,
+not authenticated consent, so the owner's written approval remains the authority.
 
 This exception does not authorise merging, pushing to `main`, force-pushing, running
 `scripts/land.sh` or `scripts/codex-review.sh`, changing normal profiles or live T3 settings,

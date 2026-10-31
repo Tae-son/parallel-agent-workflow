@@ -75,11 +75,16 @@ The runner requires all boundary paths to be absolute. It accepts only a marked 
 root; a clean standalone Git repository and Git metadata inside that root with no remotes;
 separate isolated `HOME` and `CODEX_HOME`; and an executable, nonsymlinked harmless `gh`
 stub. The child receives a scrubbed environment with isolated XDG, GitHub, Git and temporary
-state. Normal credentials are not inherited. Known sandbox-bypass arguments are refused.
-The runner neither grants project/hook trust nor changes normal profiles or live T3 settings.
+state. The isolated homes and runner-derived state paths must be symlink-free. Normal
+credentials and the caller's PATH are not inherited. Known sandbox and hook-trust bypass
+arguments, `danger-full-access` configuration, and remote-capable local Git configuration
+are refused. The runner neither grants project/hook trust nor changes normal profiles or
+live T3 settings.
 
-Fixture mode accepts only a harmless Codex executable inside the disposable root. Native
-mode, where the binary is outside that root, additionally requires `--native`,
+Fixture mode requires the selected executable to resolve inside the disposable root; tests
+place a harmless stub there. Location alone does not authenticate a binary as harmless, so
+the owner must review the exact fixture executable and command. Native mode, where the binary
+is outside that root, additionally requires `--native`,
 `--model-call-approved`, `CODEX_SMOKE_NATIVE_APPROVED=1` and
 `CODEX_SMOKE_MODEL_CALL_APPROVED=1`. These declarations deliberately force a separate owner
 decision because native activation can use network/model capacity; they are still procedural,
