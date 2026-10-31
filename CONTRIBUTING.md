@@ -71,9 +71,10 @@ building starts.
 
 **Before pushing**, it rebases on the latest `origin/main`, reruns `npm run verify`, and
 opens a pull request using the template. It never merges and never runs `scripts/land.sh`
-or Codex. A Claude Code `PreToolUse` hook (`.claude/hooks/agent-guard.mjs`) blocks the
-common forms of those commands. Like the pre-push hook, it catches accidents and ordinary
-attempts; it is not a security boundary.
+or `scripts/codex-review.sh`. It does not run Codex except for the narrow smoke-test
+exception below. A Claude Code `PreToolUse` hook (`.claude/hooks/agent-guard.mjs`) blocks
+the common forms of those commands. Like the pre-push hook, it catches accidents and
+ordinary attempts; it is not a security boundary.
 
 Codex also has a native synchronous `PreToolUse` registration in `.codex/hooks.json`;
 Hermes has a native `pre_tool_call` plugin in `.hermes/plugins/parallel-agent-guard/`.
@@ -85,6 +86,22 @@ and limitations, notably terminal stdin and effective working-directory differen
 Never grant trust, install into a live profile or disable additional execution tools
 without separate owner approval. These integrations do not weaken independent QA or
 authorise any agent to merge.
+
+**Owner-approved Codex smoke exception.** Agents may run Codex smoke tests only when the
+owner explicitly approves the exact test and its isolation boundaries. They must use
+`scripts/codex-smoke.sh`; direct `codex` invocation remains prohibited. The runner requires
+a marked disposable root, a clean standalone Git repository with no remotes, isolated
+`HOME` and `CODEX_HOME`, a harmless `gh` stub and a scrubbed child environment. It refuses
+known sandbox-bypass flags. Its `--owner-approved` declaration is procedural evidence, not
+authenticated consent, so the owner's written approval remains the authority.
+
+This exception does not authorise merging, pushing to `main`, force-pushing, running
+`scripts/land.sh` or `scripts/codex-review.sh`, changing normal profiles or live T3 settings,
+granting project/hook trust outside the approved disposable boundary, bypassing sandbox
+controls, installing dependencies, or making a paid model call without separate owner
+approval. Fixture tests may use a harmless Codex stub. Report those results separately from
+native activation, and treat the actual CLI/ACP route as unverified until an approved native
+test observes it.
 
 **Work-in-progress limit:** at most three active agent branches. Unfinished worktrees are a
 bigger risk than concurrency, so finish or close work before starting more.

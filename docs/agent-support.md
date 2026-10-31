@@ -62,6 +62,40 @@ missing Node/guard, and unexpected guard exits into exit 2 with a reason. This o
 works when Codex actually runs the hook: disabled/untrusted hooks, host-level timeouts,
 or a failure to launch the hook shell can still leave commands unguarded.
 
+### Owner-approved isolated smoke runner
+
+Agents may run Codex smoke tests only when the owner explicitly approves the exact test and
+its isolation boundaries. Direct `codex` invocation remains blocked. The sole repository
+exception is `scripts/codex-smoke.sh --owner-approved ...`, after the owner has approved the
+declared disposable root, repository, isolated homes, stubs and command. The flag does not
+authenticate owner approval; it makes the approved exception explicit and auditable while
+the written owner instruction remains authoritative.
+
+The runner requires all boundary paths to be absolute. It accepts only a marked disposable
+root; a clean standalone Git repository and Git metadata inside that root with no remotes;
+separate isolated `HOME` and `CODEX_HOME`; and an executable, nonsymlinked harmless `gh`
+stub. The child receives a scrubbed environment with isolated XDG, GitHub, Git and temporary
+state. Normal credentials are not inherited. Known sandbox-bypass arguments are refused.
+The runner neither grants project/hook trust nor changes normal profiles or live T3 settings.
+
+Fixture mode accepts only a harmless Codex executable inside the disposable root. Native
+mode, where the binary is outside that root, additionally requires `--native`,
+`--model-call-approved`, `CODEX_SMOKE_NATIVE_APPROVED=1` and
+`CODEX_SMOKE_MODEL_CALL_APPROVED=1`. These declarations deliberately force a separate owner
+decision because native activation can use network/model capacity; they are still procedural,
+not authentication. Do not install dependencies, copy production credentials, relax the
+sandbox or grant trust unless the owner separately approves that exact action.
+
+The fixture tests exercise runner allow/deny behavior with harmless stubs; fixture tests do
+not prove native activation. They also do not prove that Codex loaded the project hook or
+that the live T3/ACP route dispatches through it. Record native CLI/ACP evidence separately.
+The current installer does not deploy this repository-maintenance runner; in an installed
+target the exception remains unavailable unless its owner separately supplies and reviews an
+equivalent runner. Missing runner support is not permission to invoke `codex` directly.
+This exception never authorises merging, pushing to `main`, force-pushing, or running
+`scripts/land.sh` or `scripts/codex-review.sh`; independent QA and owner-only merging remain
+unchanged.
+
 ### Codex limits
 
 At the referenced release:

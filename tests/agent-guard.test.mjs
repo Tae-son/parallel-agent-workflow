@@ -95,6 +95,8 @@ const mustBlock = [
   '/opt/tools/codex/bin/codex exec',
   'scripts/codex-review.sh --pr 5',
   'bash scripts/codex-review.sh --pr 5',
+  'scripts/codex-smoke.sh --isolation-root /tmp/smoke',
+  'bash scripts/codex-smoke.sh --isolation-root /tmp/smoke',
   'git status\ngit push origin main',
   // shell option parsing: -o/-O consume the next word
   "bash -euo pipefail -c 'gh pr merge 5'",
@@ -172,6 +174,8 @@ const mustAllow = [
   'grep -n codex README.md',
   'cat scripts/codex-review.sh',
   'node --test tests/codex-review.test.mjs',
+  'scripts/codex-smoke.sh --owner-approved --isolation-root /tmp/smoke',
+  'bash scripts/codex-smoke.sh --owner-approved --isolation-root /tmp/smoke',
   'echo "git push origin main"',
   "git commit -m \"$(cat <<'EOF'\nDocs: don't run scripts/land.sh\ngit push origin main\nEOF\n)\"",
   'npm test 2>&1 | tail -5',

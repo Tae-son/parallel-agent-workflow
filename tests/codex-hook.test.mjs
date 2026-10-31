@@ -67,6 +67,17 @@ test('Codex registration denies a missing guard instead of returning a fail-open
   } finally { fs.renameSync(`${guard}.saved`, guard); }
 });
 
+test('Codex registration denies an undeclared smoke runner invocation', () => {
+  const r = run('scripts/codex-smoke.sh --isolation-root /tmp/smoke');
+  assert.equal(r.status, 2, r.stderr);
+  assert.match(r.stderr, /explicit owner approval/i);
+});
+
+test('Codex registration permits the explicitly declared smoke runner for its own boundary checks', () => {
+  const r = run('scripts/codex-smoke.sh --owner-approved --isolation-root /tmp/smoke');
+  assert.equal(r.status, 0, r.stderr);
+});
+
 for (const command of ['git status --short', 'gh pr view 7', 'git push -u origin feat/example', 'npm run verify']) {
   test(`Codex registration permits ${command}`, () => {
     const r = run(command);
