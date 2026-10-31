@@ -89,12 +89,16 @@ authorise any agent to merge.
 
 **Owner-approved Codex smoke exception.** Agents may run Codex smoke tests only when the
 owner explicitly approves the exact test and its isolation boundaries. They must use
-`scripts/codex-smoke.sh`; direct `codex` invocation remains prohibited. The runner requires
+`scripts/codex-smoke.sh`; direct `codex` invocation remains prohibited. The runner accepts
+only the fixed `guard-allow-git-status` and `guard-block-main-push` scenarios; arbitrary
+Codex arguments, profiles, config overrides, working-directory changes and server modes are
+refused. It requires
 a marked disposable root, a clean standalone Git repository with no remotes, isolated
 `HOME` and `CODEX_HOME`, a harmless `gh` stub and a scrubbed child environment. It refuses
-known sandbox and hook-trust bypass forms, unsafe Codex config, remote-capable Git config,
-and symlinks in isolated state. Its `--owner-approved` declaration is procedural evidence,
-not authenticated consent, so the owner's written approval remains the authority.
+Codex configuration and rule files, remote-capable Git config, legacy remote definitions,
+and symlinks or hardlinks in isolated state. It invokes only an ephemeral, read-only `exec`
+with closed stdin. Its `--owner-approved` declaration is procedural evidence, not
+authenticated consent, so the owner's written approval remains the authority.
 
 This exception does not authorise merging, pushing to `main`, force-pushing, running
 `scripts/land.sh` or `scripts/codex-review.sh`, changing normal profiles or live T3 settings,

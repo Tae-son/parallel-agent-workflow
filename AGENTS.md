@@ -12,7 +12,8 @@ before changing anything. It is the rulebook, and it wins wherever this file is 
 - Never merge, push to `main`, push with `--force` (`--force-with-lease` on your own branch
   only), or run `scripts/land.sh` or `scripts/codex-review.sh`. Do not run `codex` directly.
   Agents may run Codex smoke tests only when the owner explicitly approves the exact test
-  and its isolation boundaries, and only through `scripts/codex-smoke.sh`. This exception
+  and its isolation boundaries, and only through a named allowlisted scenario in
+  `scripts/codex-smoke.sh`. This exception
   does not relax owner-only merging, sandbox or hook-trust requirements, live-profile
   controls, or the prohibitions above.
 - For the step-by-step procedure and when to stop and ask, use the `parallel-agent-workflow`

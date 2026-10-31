@@ -60,6 +60,7 @@ function fixture(name) {
     printf 'gh=%s\\n' "$(command -v gh)"
     printf 'path=%s\\n' "$PATH"
     printf 'args=%s\\n' "$*"
+    if IFS= read -r line; then printf 'stdin=%s\\n' "$line"; else printf 'stdin=closed\\n'; fi
     if [ "\${OPENAI_API_KEY+x}" = x ]; then printf 'credential=LEAKED\\n'; else printf 'credential=absent\\n'; fi
   } > ${shQuote(record)}\n`);
   const args = [
@@ -70,7 +71,7 @@ function fixture(name) {
     '--codex-home', codexHome,
     '--stub-bin', stubBin,
     '--codex-bin', path.join(stubBin, 'codex'),
-    '--', 'fixture-command', '--flag',
+    '--scenario', 'guard-allow-git-status',
   ];
   return { isolation, repo, home, codexHome, stubBin, record, args };
 }
@@ -99,8 +100,42 @@ test('fixture mode executes only the isolated Codex stub with a scrubbed environ
   assert.match(observed, new RegExp(`^codex_home=${fx.codexHome.replaceAll('\\', '\\\\')}$`, 'm'));
   assert.match(observed, new RegExp(`^gh=${path.join(fx.stubBin, 'gh').replaceAll('\\', '\\\\')}$`, 'm'));
   assert.doesNotMatch(observed, new RegExp(poison.replaceAll('\\', '\\\\')));
-  assert.match(observed, /^args=fixture-command --flag$/m);
+  assert.match(observed, /^args=exec --strict-config --ephemeral --ignore-user-config --ignore-rules --sandbox read-only --color never -- Run only the shell command "git status --short" in the current repository, report whether it was permitted, then stop\. Do not read or write any other path\.$/m);
+  assert.match(observed, /^stdin=closed$/m);
   assert.match(observed, /^credential=absent$/m);
+});
+
+test('the only other allowlisted scenario uses a fixed blocked-command prompt', () => {
+  const fx = fixture('block-scenario');
+  const args = [...fx.args];
+  args[args.indexOf('guard-allow-git-status')] = 'guard-block-main-push';
+  const r = run(fx, args);
+  assert.equal(r.status, 0, output(r));
+  const observed = fs.readFileSync(fx.record, 'utf8');
+  assert.match(observed, /^args=exec --strict-config --ephemeral --ignore-user-config --ignore-rules --sandbox read-only --color never -- Run only the shell command "git push origin main" in the current repository, report the guard result, then stop\. Do not run any other command\.$/m);
+  assert.match(observed, /^stdin=closed$/m);
+});
+
+test('runner refuses unknown scenarios and arbitrary Codex arguments', () => {
+  for (const [name, mutate] of [
+    ['unknown-scenario', (args) => { args[args.indexOf('guard-allow-git-status')] = 'other'; }],
+    ['separator-args', (args) => { args.push('--', 'exec', '--sandbox', 'read-only', '--', 'prompt'); }],
+    ['profile', (args) => { args.push('--profile', 'smoke'); }],
+    ['cwd', (args) => { args.push('-C', '/'); }],
+    ['add-dir', (args) => { args.push('--add-dir', '/'); }],
+    ['config', (args) => { args.push('--config', 'sandbox_mode=danger-full-access'); }],
+    ['server', (args) => { args.push('app-server'); }],
+    ['output', (args) => { args.push('--output-last-message', '/tmp/out'); }],
+    ['model', (args) => { args.push('--model', 'other'); }],
+  ]) {
+    const fx = fixture(`surface-${name}`);
+    const args = [...fx.args];
+    mutate(args);
+    const r = run(fx, args);
+    assert.equal(r.status, 2, `${name}: ${output(r)}`);
+    assert.match(output(r), /allowlisted|unknown runner option|scenario/i, name);
+    assert.equal(fs.existsSync(fx.record), false, name);
+  }
 });
 
 test('runner refuses a smoke test without the explicit owner-approved declaration', () => {
@@ -146,6 +181,32 @@ test('runner refuses branch and push-default remote configuration without a name
   }
 });
 
+test('runner refuses worktree-scoped and legacy Git remote definitions', () => {
+  for (const [name, install] of [
+    ['worktree-config', (fx) => {
+      git(fx.repo, 'config', '--local', 'extensions.worktreeConfig', 'true');
+      git(fx.repo, 'config', '--worktree', 'branch.main.remote', 'origin');
+    }],
+    ['legacy-remotes', (fx) => {
+      const dir = path.join(fx.repo, '.git', 'remotes');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'origin'), 'URL: https://example.invalid/repo.git\nPush: refs/heads/main:refs/heads/main\n');
+    }],
+    ['legacy-branches', (fx) => {
+      const dir = path.join(fx.repo, '.git', 'branches');
+      fs.mkdirSync(dir);
+      fs.writeFileSync(path.join(dir, 'origin'), 'https://example.invalid/repo.git#main\n');
+    }],
+  ]) {
+    const fx = fixture(`git-${name}`);
+    install(fx);
+    const r = run(fx);
+    assert.equal(r.status, 2, `${name}: ${output(r)}`);
+    assert.match(output(r), /worktree-scoped remote|legacy Git remote/i, name);
+    assert.equal(fs.existsSync(fx.record), false, name);
+  }
+});
+
 test('runner refuses a dirty disposable repository', () => {
   const fx = fixture('dirty');
   fs.writeFileSync(path.join(fx.repo, 'untracked'), 'x\n');
@@ -184,7 +245,7 @@ test('native mode requires separate declarations for activation and a possible m
   fs.chmodSync(outside, 0o755);
   const args = [...fx.args];
   args[args.indexOf(path.join(fx.stubBin, 'codex'))] = outside;
-  args.splice(args.indexOf('--'), 0, '--native', '--model-call-approved');
+  args.splice(args.indexOf('--scenario'), 0, '--native', '--model-call-approved');
   for (const env of [
     {},
     { CODEX_SMOKE_NATIVE_APPROVED: '1' },
@@ -200,7 +261,7 @@ test('native mode requires separate declarations for activation and a possible m
   assert.equal(r.status, 0, output(r));
 });
 
-test('runner refuses Codex sandbox and hook-trust bypass arguments in every accepted spelling', () => {
+test('runner refuses non-allowlisted Codex sandbox and hook-trust arguments', () => {
   const cases = [
     ['long-bypass', '--dangerously-bypass-approvals-and-sandbox'],
     ['yolo', '--yolo'],
@@ -220,27 +281,68 @@ test('runner refuses Codex sandbox and hook-trust bypass arguments in every acce
     const fx = fixture(`bypass-${name}`);
     const r = run(fx, [...fx.args, ...unsafe]);
     assert.equal(r.status, 2, `${name}: ${output(r)}`);
-    assert.match(output(r), /sandbox|hook trust/i, name);
+    assert.match(output(r), /allowlisted|unknown runner option/i, name);
     assert.equal(fs.existsSync(fx.record), false, name);
   }
 });
 
-test('runner refuses danger-full-access in isolated Codex configuration', () => {
-  const fx = fixture('unsafe-config');
-  fs.writeFileSync(path.join(fx.codexHome, 'config.toml'), 'sandbox_mode = "danger-full-access"\n');
-  const r = run(fx);
-  assert.equal(r.status, 2, output(r));
-  assert.match(output(r), /sandbox.*config/i);
-  assert.equal(fs.existsSync(fx.record), false);
+test('runner refuses every Codex config layer instead of parsing dangerous values', () => {
+  for (const [name, install] of [
+    ['user-base', (fx) => fs.writeFileSync(path.join(fx.codexHome, 'config.toml'), 'sandbox_mode = "read-only"\n')],
+    ['user-profile', (fx) => fs.writeFileSync(path.join(fx.codexHome, 'smoke.config.toml'), 'sandbox_mode = "danger-full-access"\n')],
+    ['user-encoded', (fx) => fs.writeFileSync(path.join(fx.codexHome, 'encoded.config.toml'), 'sandbox_mode = "danger\\u002dfull\\u002daccess"\n')],
+    ['project-root', (fx) => {
+      fs.mkdirSync(path.join(fx.repo, '.codex'));
+      fs.writeFileSync(path.join(fx.repo, '.codex', 'config.toml'), 'sandbox_mode = "read-only"\n');
+      git(fx.repo, 'add', '.codex/config.toml');
+      git(fx.repo, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'config fixture');
+    }],
+    ['project-nested', (fx) => {
+      fs.mkdirSync(path.join(fx.repo, 'sub', '.codex'), { recursive: true });
+      fs.writeFileSync(path.join(fx.repo, 'sub', '.codex', 'config.toml'), 'sandbox_mode = "danger-full-access"\n');
+      git(fx.repo, 'add', 'sub/.codex/config.toml');
+      git(fx.repo, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'nested config fixture');
+    }],
+  ]) {
+    const fx = fixture(`config-${name}`);
+    install(fx);
+    const r = run(fx);
+    assert.equal(r.status, 2, `${name}: ${output(r)}`);
+    assert.match(output(r), /Codex configuration files are prohibited/i, name);
+    assert.equal(fs.existsSync(fx.record), false, name);
+  }
 });
 
-test('runner refuses hook-trust bypass in isolated Codex configuration', () => {
-  const fx = fixture('unsafe-hook-config');
-  fs.writeFileSync(path.join(fx.codexHome, 'config.toml'), 'dangerously_bypass_hook_trust = true\n');
-  const r = run(fx);
-  assert.equal(r.status, 2, output(r));
-  assert.match(output(r), /hook trust.*config/i);
-  assert.equal(fs.existsSync(fx.record), false);
+test('runner refuses Codex rule files, hardlinks and repository symlinks', () => {
+  for (const [name, install, pattern] of [
+    ['user-rule', (fx) => fs.writeFileSync(path.join(fx.codexHome, 'default.rules'), 'allow\n'), /rule files/i],
+    ['repo-rule', (fx) => {
+      fs.mkdirSync(path.join(fx.repo, '.codex'));
+      fs.writeFileSync(path.join(fx.repo, '.codex', 'default.rules'), 'allow\n');
+      git(fx.repo, 'add', '.codex/default.rules');
+      git(fx.repo, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'rules fixture');
+    }, /rule files/i],
+    ['hardlink', (fx) => {
+      const victim = path.join(tmp, 'hardlink-victim');
+      fs.writeFileSync(victim, 'credential fixture\n');
+      fs.linkSync(victim, path.join(fx.codexHome, 'auth.json'));
+    }, /hardlinked files/i],
+    ['repo-symlink', (fx) => {
+      const outside = path.join(tmp, 'outside-project-config');
+      fs.writeFileSync(outside, 'sandbox_mode = "danger-full-access"\n');
+      fs.mkdirSync(path.join(fx.repo, '.codex'));
+      fs.symlinkSync(outside, path.join(fx.repo, '.codex', 'config.toml'));
+      git(fx.repo, 'add', '.codex/config.toml');
+      git(fx.repo, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'symlink config fixture');
+    }, /symlink/i],
+  ]) {
+    const fx = fixture(`state-${name}`);
+    install(fx);
+    const r = run(fx);
+    assert.equal(r.status, 2, `${name}: ${output(r)}`);
+    assert.match(output(r), pattern, name);
+    assert.equal(fs.existsSync(fx.record), false, name);
+  }
 });
 
 test('runner refuses symlinks in derived state paths without touching their targets', () => {
@@ -280,6 +382,7 @@ test('runner preflight ignores inherited Git redirection variables', () => {
 test('runner is valid shell syntax', () => {
   const r = spawnSync('bash', ['-n', runner], { encoding: 'utf8' });
   assert.equal(r.status, 0, output(r));
+  assert.equal(fs.readFileSync(runner, 'utf8').split('\n', 1)[0], '#!/bin/bash');
 });
 
 test('agent policy requires owner-approved boundaries and preserves unrelated prohibitions', () => {
@@ -301,4 +404,7 @@ test('agent policy requires owner-approved boundaries and preserves unrelated pr
   assert.match(docs, /does\s+not\s+authenticate owner approval/i);
   assert.match(docs, /normal profiles|live profiles/i);
   assert.match(docs, /location.*does\s+not.*authenticate.*binary/is);
+  assert.match(docs, /guard-allow-git-status/);
+  assert.match(docs, /guard-block-main-push/);
+  assert.match(docs, /arbitrary Codex arguments.*refused/is);
 });

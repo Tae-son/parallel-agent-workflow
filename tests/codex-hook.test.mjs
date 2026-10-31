@@ -74,7 +74,7 @@ test('Codex registration denies an undeclared smoke runner invocation', () => {
 });
 
 test('Codex registration permits the explicitly declared smoke runner for its own boundary checks', () => {
-  const r = run('scripts/codex-smoke.sh --owner-approved --isolation-root /tmp/smoke');
+  const r = run('scripts/codex-smoke.sh --owner-approved --scenario guard-allow-git-status --isolation-root /tmp/smoke');
   assert.equal(r.status, 0, r.stderr);
 });
 

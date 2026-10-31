@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/bin/bash
 set -euo pipefail
 PATH=/usr/local/bin:/usr/bin:/bin
 export PATH
@@ -8,11 +8,13 @@ usage() {
 Usage:
   scripts/codex-smoke.sh --owner-approved \
     --isolation-root PATH --repo PATH --home PATH --codex-home PATH \
-    --stub-bin PATH --codex-bin PATH [--native --model-call-approved] -- CODEX_ARGS...
+    --stub-bin PATH --codex-bin PATH --scenario NAME \
+    [--native --model-call-approved]
 
 Runs one explicitly approved Codex smoke command with isolated HOME/CODEX_HOME,
 a disposable clean repository with no remotes, a harmless gh stub, and a scrubbed
-environment. The declaration is a procedural guardrail, not authenticated owner consent.
+environment. NAME is guard-allow-git-status or guard-block-main-push; arbitrary Codex
+arguments are not accepted. The declaration is a procedural guardrail, not authenticated owner consent.
 A Codex binary outside the disposable root is native mode and additionally requires
 both native/model-call flags and matching CODEX_SMOKE_*_APPROVED=1 environment declarations.
 EOF
@@ -39,6 +41,7 @@ isolated_home=
 codex_home=
 stub_bin=
 codex_bin=
+scenario=
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -51,12 +54,11 @@ while [ "$#" -gt 0 ]; do
     --codex-home) need_value "$@"; codex_home=$2; shift 2 ;;
     --stub-bin) need_value "$@"; stub_bin=$2; shift 2 ;;
     --codex-bin) need_value "$@"; codex_bin=$2; shift 2 ;;
-    --) shift; break ;;
+    --scenario) need_value "$@"; scenario=$2; shift 2 ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown runner option: $1" ;;
   esac
 done
-codex_args=("$@")
 
 [ "$owner_approved" -eq 1 ] || die 'explicit owner approval is required (--owner-approved)'
 [ -n "$isolation_root" ] || die '--isolation-root is required'
@@ -65,7 +67,21 @@ codex_args=("$@")
 [ -n "$codex_home" ] || die '--codex-home is required'
 [ -n "$stub_bin" ] || die '--stub-bin is required'
 [ -n "$codex_bin" ] || die '--codex-bin is required'
-[ "${#codex_args[@]}" -gt 0 ] || die 'Codex arguments are required after --'
+[ -n "$scenario" ] || die '--scenario is required'
+
+case "$scenario" in
+  guard-allow-git-status)
+    prompt='Run only the shell command "git status --short" in the current repository, report whether it was permitted, then stop. Do not read or write any other path.'
+    ;;
+  guard-block-main-push)
+    prompt='Run only the shell command "git push origin main" in the current repository, report the guard result, then stop. Do not run any other command.'
+    ;;
+  *) die 'scenario is not allowlisted; use guard-allow-git-status or guard-block-main-push' ;;
+esac
+codex_args=(
+  exec --strict-config --ephemeral --ignore-user-config --ignore-rules
+  --sandbox read-only --color never -- "$prompt"
+)
 
 for value in "$isolation_root" "$repo" "$isolated_home" "$codex_home" "$stub_bin" "$codex_bin"; do
   [[ "$value" == /* ]] || die "all boundary paths must be absolute: $value"
@@ -99,22 +115,6 @@ for pair in "repo:$repo" "home:$isolated_home" "CODEX_HOME:$codex_home" "stub bi
 done
 [ "$isolated_home" != "$codex_home" ] || die 'HOME and CODEX_HOME must be separate isolated directories'
 
-for arg in "${codex_args[@]}"; do
-  compact=${arg//[[:space:]]/}
-  compact=${compact//\"/}
-  compact=${compact//\'/}
-  case "$arg" in
-    --dangerously-bypass-approvals-and-sandbox|--dangerously-bypass-approvals-and-sandbox=*|--yolo|--yolo=*)
-      die 'Codex sandbox bypass is prohibited in smoke tests'
-      ;;
-    --dangerously-bypass-hook-trust|--dangerously-bypass-hook-trust=*)
-      die 'Codex hook trust bypass is prohibited in smoke tests'
-      ;;
-  esac
-  [[ "$compact" != *danger-full-access* ]] || die 'Codex sandbox bypass is prohibited in smoke tests'
-  [[ "$compact" != *dangerously_bypass_hook_trust=true* ]] || die 'Codex hook trust bypass is prohibited in smoke tests'
-done
-
 real_git=$(command -v git) || die 'git is required'
 real_git=$(realpath -e -- "$real_git") || die 'cannot resolve git executable'
 safe_git() {
@@ -135,6 +135,14 @@ if safe_git -C "$repo" config --local --get-regexp \
   >/dev/null 2>&1; then
   die 'disposable repository must not have remote configuration, URL rewrites or config includes'
 fi
+if safe_git -C "$repo" config --worktree --get-regexp \
+  '^(remote\..*\.(url|pushurl)|remote\.pushdefault|branch\..*\.(remote|pushremote)|url\..*\.(insteadof|pushinsteadof)|include(if)?\.)' \
+  >/dev/null 2>&1; then
+  die 'disposable repository must not have worktree-scoped remote configuration, URL rewrites or config includes'
+fi
+for legacy_remote_dir in "$common/remotes" "$common/branches"; do
+  [ ! -e "$legacy_remote_dir" ] || die "disposable repository must not have legacy Git remote definitions: $legacy_remote_dir"
+done
 [ -z "$(safe_git -C "$repo" status --porcelain=v1 --untracked-files=all)" ] || die 'disposable repository must be clean'
 
 [ -f "$stub_bin/gh" ] && [ -x "$stub_bin/gh" ] && [ ! -L "$stub_bin/gh" ] \
@@ -158,25 +166,18 @@ for live in "$caller_home" "$caller_codex_home"; do
   done
 done
 
-for tree in "$isolated_home" "$codex_home"; do
-  symlink=$(find "$tree" -type l -print -quit)
-  [ -z "$symlink" ] || die "isolated state must not contain symlinks: $symlink"
-done
+symlink=$(find "$isolation_root" -type l -print -quit)
+[ -z "$symlink" ] || die "isolated state must not contain symlinks: $symlink"
 
-scan_codex_config() {
-  local config=$1 line normalized
-  [ -e "$config" ] || return 0
-  [ -f "$config" ] && [ ! -L "$config" ] || die "Codex config must be a regular nonsymlink file: $config"
-  while IFS= read -r line || [ -n "$line" ]; do
-    normalized=${line//[[:space:]]/}
-    normalized=${normalized//\"/}
-    normalized=${normalized//\'/}
-    [[ "$normalized" != *danger-full-access* ]] || die "Codex sandbox bypass in config is prohibited: $config"
-    [[ "$normalized" != *dangerously_bypass_hook_trust=true* ]] || die "Codex hook trust bypass in config is prohibited: $config"
-  done < "$config"
-}
-scan_codex_config "$codex_home/config.toml"
-scan_codex_config "$repo/.codex/config.toml"
+hardlink=$(find "$isolation_root" -type f -links +1 -print -quit)
+[ -z "$hardlink" ] || die "isolated state must not contain hardlinked files: $hardlink"
+
+codex_config=$(find "$codex_home" -type f \( -name config.toml -o -name '*.config.toml' \) -print -quit)
+[ -z "$codex_config" ] || die "Codex configuration files are prohibited for allowlisted smoke scenarios: $codex_config"
+project_config=$(find "$repo" -type f -path '*/.codex/config.toml' -print -quit)
+[ -z "$project_config" ] || die "Codex configuration files are prohibited for allowlisted smoke scenarios: $project_config"
+rules_file=$(find "$codex_home" "$repo" -type f -name '*.rules' -print -quit)
+[ -z "$rules_file" ] || die "Codex rule files are prohibited for allowlisted smoke scenarios: $rules_file"
 
 ensure_isolated_dir() {
   local dir=$1 resolved
@@ -208,7 +209,7 @@ fi
 git_config=$(realpath -e -- "$git_config") || die 'cannot resolve isolated Git config'
 inside "$git_config" "$isolation_root" || die 'isolated Git config escaped the isolation root'
 
-child_path="$stub_bin:$(dirname "$codex_bin"):/usr/local/bin:/usr/bin:/bin"
+child_path="$stub_bin:/usr/local/bin:/usr/bin:/bin"
 (
   cd "$repo"
   exec env -i \
@@ -225,5 +226,5 @@ child_path="$stub_bin:$(dirname "$codex_bin"):/usr/local/bin:/usr/bin:/bin"
     GIT_TERMINAL_PROMPT=0 \
     GIT_ASKPASS=/bin/false \
     LC_ALL=C \
-    "$codex_bin" "${codex_args[@]}"
+    "$codex_bin" "${codex_args[@]}" </dev/null
 )

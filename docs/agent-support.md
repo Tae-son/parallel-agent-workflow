@@ -67,19 +67,32 @@ or a failure to launch the hook shell can still leave commands unguarded.
 Agents may run Codex smoke tests only when the owner explicitly approves the exact test and
 its isolation boundaries. Direct `codex` invocation remains blocked. The sole repository
 exception is `scripts/codex-smoke.sh --owner-approved ...`, after the owner has approved the
-declared disposable root, repository, isolated homes, stubs and command. The flag does not
+declared disposable root, repository, isolated homes, stubs and named scenario. The flag does not
 authenticate owner approval; it makes the approved exception explicit and auditable while
 the written owner instruction remains authoritative.
+
+The runner exposes exactly two scenarios:
+
+- `--scenario guard-allow-git-status` asks Codex to run only `git status --short`.
+- `--scenario guard-block-main-push` asks Codex to attempt only `git push origin main` so
+  the guard's denial can be observed without a configured remote.
+
+Arbitrary Codex arguments are refused. Each scenario expands to a fixed non-interactive
+`exec` invocation with strict config handling, ephemeral session state, ignored user config
+and rule files, the read-only sandbox, deterministic color and closed stdin. Profiles,
+inline config, cwd and writable-root expansion, alternate subcommands, server modes, model
+selection and output paths are therefore outside the accepted command surface.
 
 The runner requires all boundary paths to be absolute. It accepts only a marked disposable
 root; a clean standalone Git repository and Git metadata inside that root with no remotes;
 separate isolated `HOME` and `CODEX_HOME`; and an executable, nonsymlinked harmless `gh`
 stub. The child receives a scrubbed environment with isolated XDG, GitHub, Git and temporary
-state. The isolated homes and runner-derived state paths must be symlink-free. Normal
-credentials and the caller's PATH are not inherited. Known sandbox and hook-trust bypass
-arguments, `danger-full-access` configuration, and remote-capable local Git configuration
-are refused. The runner neither grants project/hook trust nor changes normal profiles or
-live T3 settings.
+state. The complete disposable root must be free of symlinks and hardlinks. Normal
+credentials and the caller's PATH are not inherited. All Codex config and rule files are
+refused rather than parsed, including profile files and nested project config. Named,
+worktree-scoped and legacy Git remote definitions, URL rewrites and config includes are
+refused. The runner neither grants project/hook trust nor changes normal profiles or live
+T3 settings.
 
 Fixture mode requires the selected executable to resolve inside the disposable root; tests
 place a harmless stub there. Location alone does not authenticate a binary as harmless, so
