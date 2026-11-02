@@ -1,5 +1,5 @@
 import { fileURLToPath } from 'node:url';
-import { test } from 'node:test';
+import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -60,6 +60,10 @@ function qaReport(head) {
 }
 const qaBlock = (report) => `\n\n## Independent QA\n\n\`\`\`independent-qa\n${JSON.stringify(report, null, 2)}\n\`\`\`\n`;
 
+// Each fixture is ~230 files (three git repos); remove them all once this file's tests finish.
+const fixtureDirs = [];
+after(() => { for (const dir of fixtureDirs) fs.rmSync(dir, { recursive: true, force: true }); });
+
 function makeFixture({
   files = { 'docs/notes.md': 'updated notes\n' },
   symlinks = {},
@@ -81,6 +85,7 @@ function makeFixture({
   qa = qaReport,
 } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'land-test-'));
+  fixtureDirs.push(dir);
   const origin = path.join(dir, 'origin.git');
   const primary = path.join(dir, 'primary');
   const agent = path.join(dir, 'agent');
@@ -165,7 +170,8 @@ const quote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 // session with no controlling terminal.
 function land(fx, args = [String(N)], { answers = '', tty = true, landPath, repoEnv = REPO } = {}) {
   const script = landPath ?? path.join(fx.primary, 'scripts/land.sh');
-  const env = { ...gitEnv, PATH: `${fx.bin}:${process.env.PATH}`, SHELL: '/bin/bash', LAND_GH_STUB_DIR: fx.stub, GIT_CONFIG_GLOBAL: fx.globalConfig ?? '/dev/null' };
+  // TMPDIR: land.sh keeps its land-codex-* review dir on purpose; put it inside the fixture so it is cleaned up too.
+  const env = { ...gitEnv, PATH: `${fx.bin}:${process.env.PATH}`, SHELL: '/bin/bash', LAND_GH_STUB_DIR: fx.stub, GIT_CONFIG_GLOBAL: fx.globalConfig ?? '/dev/null', TMPDIR: fx.dir };
   if (repoEnv !== null) env.LAND_REPO = repoEnv; else delete env.LAND_REPO;
   const opts = { cwd: fx.primary, env, input: answers, encoding: 'utf8', timeout: 30000 };
   const r = tty
