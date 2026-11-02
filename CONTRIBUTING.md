@@ -105,7 +105,9 @@ and native evidence requirements. Execute the runner directly so its privileged 
 ignores caller shell initialization. It invokes only an ephemeral, read-only `exec`
 with closed stdin, captures Codex's output under a per-run directory, and exits 0 only
 when the hook receipts written by the pinned fixture registration prove exactly the
-scenario command and verdict. Its `--owner-approved` declaration is procedural evidence,
+scenario command and verdict and Codex's rendered command item (never a model message)
+agrees. The node it uses must first pass a positive identity check, and each of its Node
+checks must report an explicit success line; a silent exit is a refusal. Its `--owner-approved` declaration is procedural evidence,
 not authenticated consent, so the owner's written approval remains the authority.
 
 This exception does not authorise merging, pushing to `main`, force-pushing, running

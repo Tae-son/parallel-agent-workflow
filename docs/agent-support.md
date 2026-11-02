@@ -76,16 +76,19 @@ The runner exposes exactly two scenarios, each requesting one shell tool call:
 - `--scenario guard-allow-git-status` requests
   `git status --short && printf '%s\n' CODEX_SMOKE_ALLOW_EXECUTED`.
   PASS requires one hook receipt for exactly that command with guard exit 0 and empty
-  stderr, the `hook: PreToolUse Completed` status in Codex's captured output, and the
-  marker line from the rendered tool result.
+  stderr, the `hook: PreToolUse Completed` status in Codex's captured output, and exactly
+  one rendered command item: that command, in the disposable repository, with a
+  ` succeeded` status and the marker line inside that item's output (grammar below).
 - `--scenario guard-block-main-push` requests
   `printf '%s\n' CODEX_SMOKE_DENY_PAYLOAD_EXECUTED; git push origin main`.
   PASS requires one hook receipt for exactly that command whose recorded guard exit is 2
   and whose recorded stderr begins `agent-guard: pushing to main is owner-only`, plus the
-  `hook: PreToolUse Blocked` status and no payload marker line in Codex's captured output.
+  `hook: PreToolUse Blocked` status, no rendered command item and no payload marker line
+  in Codex's captured output.
   The marker precedes Git, so missing remotes cannot explain its absence. A Git/sandbox/auth
   error, model refusal, unattempted tool call, duplicate call or `agent-guard unavailable`
-  exit does not pass. Text in the prompt or a model's final answer is never evidence.
+  exit does not pass. Text in the prompt or a model's message is never evidence: nothing
+  after the first agent message in Codex's output counts toward a PASS.
 
 #### Hook receipts: why the evidence comes from the hook, not the model
 
@@ -101,9 +104,32 @@ returns before any command item exists. `exec` prints only `hook: PreToolUse` an
 
 A command hook, however, is an ordinary host process:
 [`command_runner.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/hooks/src/engine/command_runner.rs)
-spawns `$SHELL -lc COMMAND` (or `/bin/sh -lc` when `SHELL` is unset, as in the runner's
-scrubbed environment) with the session's startup environment and the turn's cwd, outside
-the tool sandbox. The read-only tool sandbox has no writable root
+(`build_command`, lines 444-497) spawns it with the session's startup environment and
+the turn's cwd, outside the tool sandbox. In the runner's default v0.165 `exec` it runs as
+`<passwd shell> -c COMMAND`, a non-login shell: `build_hooks_config`
+([`core/src/session/mod.rs:5633-5650`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/session/mod.rs#L5633-L5650))
+takes the program and arguments from the single local environment's shell through
+`derive_exec_args("", use_login_shell = false)`
+([`core/src/shell.rs:24-33`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/shell.rs#L24-L33)), and the session passes
+`single_local_environment()`
+([`core/src/session/session.rs:1661-1666`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/session/session.rs#L1661-L1666)).
+That shell is `default_user_shell()`
+([`session.rs:1454-1457`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/session/session.rs#L1454-L1457),
+[`environment_selection.rs:984`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/environment_selection.rs#L984)):
+the account's passwd `pw_shell` when it is bash, zsh or sh, otherwise bash, zsh, then a
+final fallback
+([`shell-command/src/shell_detect.rs:39-65, 359-381`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/shell-command/src/shell_detect.rs#L359-L381)).
+The local environment is ready by default because `Feature::DeferredExecutor` is
+under development and off
+([`features/src/lib.rs:1182-1185`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/features/src/lib.rs#L1182-L1185)).
+`$SHELL -lc` (or `/bin/sh -lc` without `SHELL`) is only `command_runner.rs`'s fallback
+when no single local environment shell exists (lines 450-459). Consequences: for a zsh
+account, `zsh -c` reads `/etc/zshenv` and `$ZDOTDIR/.zshenv` (the isolated `HOME` has no
+`.zshenv`; `/etc/zshenv` is host-controlled); `bash -c` reads nothing unless `BASH_ENV`
+is set, and the scrubbed environment has none; `sh` (often dash) reads nothing for `-c`.
+The adapter is therefore written to plain POSIX shell syntax and is tested under every
+shell available on the test host (`bash -c`, `bash --posix -c`, `sh -c`, and `zsh -c` or
+`dash -c` when installed). The read-only tool sandbox has no writable root
 ([`protocol.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/protocol/src/protocol.rs)),
 so the model's command cannot create or edit what the hook writes.
 
@@ -114,9 +140,14 @@ receipt adapter: it refuses to run unless `CODEX_SMOKE_RECEIPT_DIR` is an absolu
 creates one `call-PID` directory there with `mkdir` (exclusive; never follows a link),
 copies the hook's stdin JSON to `input.json`, runs the tracked command with that input and
 its stderr captured to `stderr`, records the exit code in `exit`, replays stderr and exits
-with the same code. The unchanged shared guard still decides; the adapter adds no
-decision logic, deletes nothing, and fails closed with `agent-guard unavailable` on any
-adapter error. The handler fields, matcher and timeout equal the tracked registration.
+with the same code. It first sets `umask 077`, so a hostile caller umask cannot make its
+own files unreadable. The unchanged shared guard still decides; the adapter adds no
+decision logic and deletes nothing. Its own failures exit 2 with an `agent-guard
+unavailable` reason, which v0.165 treats as blocking: a wrapped exit other than 0 or 2
+(for example a failed redirection) is recorded raw in `exit` and reported as
+`agent-guard unavailable: smoke adapter failed`, as is a failure to replay stderr or
+record the exit code. The handler fields, matcher and timeout equal the tracked
+registration.
 
 For every run the runner creates `ISOLATION_ROOT/runs/<UTC time>-<pid>/` containing an
 empty `receipts/` directory, `codex.stdout`, `codex.stderr` and `codex.status`, named to the
@@ -126,6 +157,38 @@ and `stderr` as regular single-link files; `tool_name` `Bash`, `tool_input.comma
 to the scenario command byte for byte, `cwd` equal to the disposable repository, non-empty
 `session_id` and `tool_use_id`; the scenario's exit/stderr/status conditions above; Codex
 exit 0. Evidence failures exit 1 with each reason, distinct from preflight refusals (2).
+
+Codex's captured stderr is read with the v0.165 `exec --color never` human-output
+grammar ([`event_processor_with_human_output.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/exec/src/event_processor_with_human_output.rs),
+`render_item_started` lines 70-98, `render_item_completed` lines 100-166):
+
+- A command item is a line `exec`, then `<command> in <cwd>`, then a status line
+  ` succeeded:`, ` exited N:`, ` declined:` or ` in progress:` (each optionally with
+  ` in Nms` before the colon), then its output lines up to the next top-level line
+  (`exec`, `codex`, `user`, `hook: `, `mcp: `, `patch: `, `apply patch`, `web search: `,
+  `collab: `, `warning: `, `ERROR: `, `deprecated: `, `model rerouted: `,
+  `context compacted`, `turn interrupted`, `tokens used`, a plan step or the end).
+- `<command>` is `shlex_join` of the shell-wrapped argv
+  ([`item_builders.rs:54-61`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/app-server-protocol/src/protocol/item_builders.rs#L54-L61)),
+  not the hook's `tool_input.command`: `exec_command` runs
+  `[<shell>, -lc|-c, cmd]` ([`unified_exec.rs:133-159`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/tools/handlers/unified_exec.rs#L133-L159))
+  while the hook receives `cmd` itself. The validator splits it as POSIX words and
+  requires exactly an absolute `bash`, `zsh`, `sh` or `dash` path, `-c` or `-lc`, and the
+  scenario command byte for byte.
+- An agent message is a line `codex` followed by free model text with no terminator
+  (lines 102-110), so nothing after the first `codex` line is positive evidence. It is
+  only searched for lines that fail a run: hook statuses of the wrong kind, the payload
+  marker, or a second rendering of the scenario command.
+
+The allow scenario needs exactly one command item before the first agent message, for the
+scenario command with cwd equal to the repository, a succeeded status and the marker as a
+line of that item's output; the scenario command may be rendered as an item only once in
+the whole output. The block scenario needs no command item before the first agent message
+and no rendering of the scenario command anywhere. A status line outside a rendered item
+fails both. Limits: reasoning summaries are printed without a label (lines 111-121), so
+the requirement that the scenario item appear exactly once, alongside exactly one receipt,
+is what stops reasoning text from standing in for the real item; and a model that sends
+a message before its tool call produces a run that FAILs and must be repeated.
 `--revalidate --run-dir PATH --repo PATH --scenario NAME` repeats that validation on a
 preserved run directory, for QA or the owner.
 
@@ -134,10 +197,11 @@ unavailable or crashed guard (exit 2, `agent-guard unavailable`); an untrusted, 
 or unloaded hook (no receipt, no `hook:` lines, the tool ran); no tool call (no receipt, no
 `hook:` lines); a wrong or additional command (command mismatch or two receipts); a
 remote, sandbox or auth error (exit 0 receipt, failed command item); model narrative only
-(no receipt). What it does not prove: receipts are written by a process of the same user,
-so concurrent same-user mutation, host profile scripts sourced by the login shell
-(`/etc/profile`; the isolated `HOME` has no profile), and the identity of the Codex binary
-remain outside this procedural record.
+(no receipt, or no succeeded command item before the first agent message). What it does
+not prove: receipts are written by a process of the same user, so concurrent same-user
+mutation, host-controlled startup files the hook shell reads (`/etc/zshenv` for a zsh
+account; the isolated `HOME` has none), and the identity of the Codex binary remain
+outside this procedural record.
 
 Arbitrary Codex arguments are refused. Each scenario expands to a fixed non-interactive
 `exec --strict-config --ephemeral --ignore-rules --sandbox read-only --color never -- PROMPT`
@@ -156,7 +220,7 @@ path is replaced with the canonical disposable repository path):
 trust_level = "trusted"
 
 [hooks.state."/exact/disposable/repo/.codex/hooks.json:pre_tool_use:0:0"]
-trusted_hash = "sha256:ee2d53bea894561e06cb1124d19a5e791d6d7e2153986b5c07e4600abb47e159"
+trusted_hash = "sha256:35cc601ac77904656ed3a63b039bb5332760eebb6dd2ea715f29e7a74a6739bd"
 ```
 
 This is ordinary exact-hook trust, not a bypass. Project trust enables discovery of the
@@ -170,7 +234,7 @@ and `type = "command"`. Absent optional fields are omitted through TOML serializ
 
 Before creating trust, the runner checks that its generated fixture registration hashes
 to the reviewed SHA-256
-`d99ab530aa32415a064978c7d6d055e2a6eb45525007d48d71460922cfc1e7af`, that the
+`e36be1913a9bec5a42d33331074112d1acd5aab776c62272a5bdb714116a184f`, that the
 repository's `.codex/hooks.json` equals those bytes, and that the shared guard script
 hashes to `e7462097ed76c62691050b0f7e99fc9ed693166c14ca623db70033135983a4a2`.
 The trusted hash above is the v0.165 identity of that fixture registration, not of the
@@ -197,15 +261,24 @@ mechanism; it does not establish native activation on a particular binary or hos
 
 #### Required isolation and activation evidence
 
-Use Linux with `/bin/bash`, Node and system Git. The runner resolves node once, without
-executing a candidate, and passes that exact path to each of its scrubbed `env -i` Node
-processes. It uses an executable `node` in its fixed `/usr/bin:/bin` first. Otherwise
+Use Linux with `/bin/bash`, Node, system Git and `/usr/bin/sha256sum`. The runner
+resolves node once, without executing a candidate, and passes that exact path to each of
+its scrubbed `env -i` Node processes. It uses an executable `node` in its fixed `/usr/bin:/bin` first. Otherwise
 (for example on GitHub Actions, where `actions/setup-node` installs node elsewhere) it
 takes the first absolute caller `PATH` entry containing `node`, skipping relative entries.
 That candidate's realpath must be a regular ELF file named `node` outside the isolation
 root, so script shims and symlink shims such as mise's (which resolve to the `mise`
-binary) are refused, and a refused first candidate fails closed. Run output records the
-chosen path and its source as `codex-smoke: node PATH (SOURCE)`. Only in the fallback
+binary) are refused, and a refused first candidate fails closed. Before any other use,
+the resolved binary must pass a positive identity check: under `env -i` it must print
+exactly `codex-smoke-node:<major.minor.patch>:42`, computed by Node, so an ELF that merely
+exits 0 (such as a copy of `true` named `node`) is refused. Every runner Node process
+then ends with a success sentinel (`codex-smoke: fixture hooks generated`,
+`codex-smoke: preflight ok`, `codex-smoke: trust written`, `codex-smoke: evidence PASS`)
+that the shell requires in addition to exit status 0; a silent exit 0 is a refusal. The
+generated fixture registration must also be non-empty and hash to its reviewed pin under
+`/usr/bin/sha256sum`, independently of node, before `--print-fixture-hooks` prints it or a
+run uses it. Run output records the chosen path and its source as
+`codex-smoke: node PATH (SOURCE)`. Only in the fallback
 case is that node's directory appended after `STUB:/usr/bin:/bin` in the child `PATH`,
 so the hook and recording stub can run bare `node`. It cannot shadow the stubs, Git or
 system tools, though other executables in that directory become reachable by name. The
@@ -246,8 +319,10 @@ PATH and environment are not inherited. `--stub-bin` contains only the exact har
 `gh` stub (`#!/bin/sh`, print `harmless gh stub` to stderr, exit 97) and, in fixture mode,
 the exact recording `codex` stub defined in `tests/codex-smoke.test.mjs`. That stub records
 its environment, then emulates v0.165 dispatch order for the one requested command: it
-runs the committed hook through `/bin/sh -lc` with a Codex-shaped payload, prints the
-`hook:` status lines, and executes the command only when the hook allowed it. Location alone
+runs the committed hook as `<passwd shell> -c HOOK` (the shell from Node's
+`os.userInfo()` when it is an absolute bash, zsh or sh, otherwise `/bin/sh`) with a
+Codex-shaped payload, prints the `hook:` status lines, and only when the hook allowed it
+executes the command with that shell and prints a command item in the grammar above. Location alone
 does not authenticate a binary as harmless; the runner also compares those complete
 stub contents and refuses additional executables.
 
@@ -267,7 +342,8 @@ consent. Normal profiles, external trust and live T3 settings are never changed.
 Preserve the complete run directory (receipts, captured Codex output and status) for
 both scenarios, the binary version/identity, execution surface, exact generated trust bytes
 and hook/guard pins. Codex exit zero alone is not a guard PASS; the runner exits 0 only
-when the receipt validation passes, and `--revalidate` can repeat it. A later separately
+when the receipt validation passes and reports its PASS sentinel, and `--revalidate` can
+repeat it. A later separately
 approved native run must supply this evidence; this PR's implementation and QA use
 harmless fixtures and source review only.
 

@@ -28,6 +28,13 @@ const systemNode = ['/usr/bin/node', '/bin/node'].some((file) => {
 });
 const childNodePath = systemNode ? '' : `:${nodeDir}`;
 
+// v0.165 default exec runs command hooks as `<passwd shell> -c COMMAND` (see
+// docs/agent-support.md); the adapter must behave the same under every POSIX shell here.
+const hookShells = [['bash', '-c'], ['bash', '--posix', '-c'], ['sh', '-c'], ['zsh', '-c'], ['dash', '-c']]
+  .map(([name, ...flags]) => [['/usr/bin', '/bin'].map((dir) => path.join(dir, name)).find((file) => {
+    try { fs.accessSync(file, fs.constants.X_OK); return true; } catch { return false; }
+  }), ...flags]).filter(([file]) => file);
+
 let tmp;
 before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-smoke-test-')); });
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -96,18 +103,23 @@ function fixture(name) {
   } > ${shQuote(record)}
 exec node - "$@" <<'STUB'
 const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const prompt = process.argv[process.argv.length - 1];
 const command = prompt.split('with this exact command:\\n')[1].split('\\nReport')[0];
 const hook = JSON.parse(fs.readFileSync('.codex/hooks.json', 'utf8')).hooks.PreToolUse[0].hooks[0].command;
 const input = JSON.stringify({ session_id: 'fixture-session', turn_id: 'fixture-turn', cwd: process.cwd(),
   hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, tool_use_id: 'fixture-call' });
+let shell = '/bin/sh';
+try { const user = os.userInfo().shell; if (user.startsWith('/') && ['bash', 'zsh', 'sh'].includes(path.basename(user))) shell = user; } catch {}
 process.stderr.write('hook: PreToolUse\\n');
-const decision = spawnSync('/bin/sh', ['-lc', hook], { input, encoding: 'utf8' });
+const decision = spawnSync(shell, ['-c', hook], { input, encoding: 'utf8' });
 if (decision.status === 2 && decision.stderr.trim()) { process.stderr.write('hook: PreToolUse Blocked\\n'); process.exit(0); }
 process.stderr.write(decision.status === 0 ? 'hook: PreToolUse Completed\\n' : 'hook: PreToolUse Failed\\n');
-const run = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' });
-process.stderr.write(\`exec\\n\${command} in \${process.cwd()}\\n\${run.status === 0 ? ' succeeded' : \` exited \${run.status}\`}:\\n\${run.stdout}\${run.stderr}\`);
+const run = spawnSync(shell, ['-c', command], { encoding: 'utf8' });
+const rendered = \`\${shell} -c '\${command.split("'").join("'\\\\''")}'\`;
+process.stderr.write(\`exec\\n\${rendered} in \${process.cwd()}\\n\${run.status === 0 ? ' succeeded' : \` exited \${run.status}\`}:\\n\${run.stdout}\${run.stderr}\`);
 STUB
 `);
   const args = [
@@ -160,7 +172,7 @@ function expectedTrust(fx) {
   const identity = { event_name: 'pre_tool_use', hooks: [{ async: false,
     command: hook.command, timeout: 10, type: 'command' }], matcher: '^Bash$' };
   const hash = `sha256:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
-  assert.equal(hash, 'sha256:ee2d53bea894561e06cb1124d19a5e791d6d7e2153986b5c07e4600abb47e159');
+  assert.equal(hash, 'sha256:35cc601ac77904656ed3a63b039bb5332760eebb6dd2ea715f29e7a74a6739bd');
   return `[projects.${JSON.stringify(fx.repo)}]\ntrust_level = "trusted"\n\n` +
     `[hooks.state.${JSON.stringify(`${fx.repo}/.codex/hooks.json:pre_tool_use:0:0`)}]\ntrusted_hash = "${hash}"\n`;
 }
@@ -184,7 +196,7 @@ test('runner refuses changed, expanded or relocated trust without overwriting it
   for (const [name, mutate] of [
     ['repo', (text) => text.replaceAll('/repo', '/other-repo')],
     ['broad-project', (text) => text.replaceAll('/repo', '')],
-    ['hash', (text) => text.replace('ee2d53', '1e2d53')],
+    ['hash', (text) => text.replace('35cc60', '45cc60')],
     ['extra-hook', (text) => `${text}\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = "touch /tmp/must-not-run"\n`],
     ['extra-config', (text) => `sandbox_mode = "danger-full-access"\n${text}`],
     ['profile', (text) => `profile = "smoke"\n${text}`],
@@ -245,7 +257,7 @@ test('trust cannot be replayed after moving the repository and quoted paths stay
   assert.deepEqual(JSON.parse(parsed.stdout), {
     projects: { [fx.repo]: { trust_level: 'trusted' } },
     hooks: { state: { [`${fx.repo}/.codex/hooks.json:pre_tool_use:0:0`]: {
-      trusted_hash: 'sha256:ee2d53bea894561e06cb1124d19a5e791d6d7e2153986b5c07e4600abb47e159',
+      trusted_hash: 'sha256:35cc601ac77904656ed3a63b039bb5332760eebb6dd2ea715f29e7a74a6739bd',
     } } },
   });
   const moved = path.join(fx.isolation, 'moved-repo');
@@ -296,25 +308,32 @@ test('fixed scenario commands exercise the exact pinned hook with distinct allow
       assert.doesNotMatch(codexStderr, /^CODEX_SMOKE_DENY_PAYLOAD_EXECUTED$/m, 'the payload marker must never be emitted');
     }
     // The same registration, run directly the way v0.165 runs command hooks
-    // (/bin/sh -lc, JSON on stdin), yields the same receipt without the stub.
-    const direct = path.join(fx.isolation, `direct-${scenario}`);
-    fs.mkdirSync(direct);
-    const env = { HOME: fx.home, CODEX_HOME: fx.codexHome, CODEX_SMOKE_RECEIPT_DIR: direct,
-      PATH: `${fx.stubBin}:/usr/bin:/bin${childNodePath}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
-    const decision = spawnSync('/bin/sh', ['-lc', hook.command], { cwd: fx.repo, env, encoding: 'utf8',
-      input: JSON.stringify({ session_id: 's', tool_name: 'Bash', tool_input: { command }, cwd: fx.repo, tool_use_id: 't' }) });
-    assert.equal(decision.stdout, '');
-    const [directCall] = fs.readdirSync(direct);
-    assert.match(directCall, /^call-[0-9]+$/);
-    assert.equal(fs.readFileSync(path.join(direct, directCall, 'exit'), 'utf8'), `${decision.status}\n`);
-    assert.equal(fs.readFileSync(path.join(direct, directCall, 'stderr'), 'utf8'), decision.stderr);
-    assert.equal(decision.status, scenario === 'guard-allow-git-status' ? 0 : 2, output(decision));
+    // (passwd shell -c, JSON on stdin), yields the same receipt without the stub, in every
+    // available POSIX shell and under a hostile caller umask.
+    for (const [shell, ...flags] of hookShells) {
+      for (const umask of ['022', '0400']) {
+        const direct = path.join(fx.isolation, `direct-${scenario}-${path.basename(shell)}${flags.length}-${umask}`);
+        fs.mkdirSync(direct);
+        const env = { HOME: fx.home, CODEX_HOME: fx.codexHome, CODEX_SMOKE_RECEIPT_DIR: direct,
+          PATH: `${fx.stubBin}:/usr/bin:/bin${childNodePath}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+        const decision = spawnSync('/bin/sh', ['-c', `umask ${umask}; exec "$@"`, 'sh', shell, ...flags, hook.command],
+          { cwd: fx.repo, env, encoding: 'utf8',
+            input: JSON.stringify({ session_id: 's', tool_name: 'Bash', tool_input: { command }, cwd: fx.repo, tool_use_id: 't' }) });
+        const label = `${shell} ${flags.join(' ')} umask ${umask}`;
+        assert.equal(decision.stdout, '', label);
+        const [directCall] = fs.readdirSync(direct);
+        assert.match(directCall, /^call-[0-9]+$/, label);
+        assert.equal(fs.readFileSync(path.join(direct, directCall, 'exit'), 'utf8'), `${decision.status}\n`, label);
+        assert.equal(fs.readFileSync(path.join(direct, directCall, 'stderr'), 'utf8'), decision.stderr, label);
+        assert.equal(decision.status, scenario === 'guard-allow-git-status' ? 0 : 2, `${label}: ${output(decision)}`);
+      }
+    }
   }
 });
 
 test('fixture registration embeds the tracked kit hook unchanged and matches its reviewed pins', () => {
   const text = fixtureHooks();
-  assert.equal(createHash('sha256').update(text).digest('hex'), 'd99ab530aa32415a064978c7d6d055e2a6eb45525007d48d71460922cfc1e7af');
+  assert.equal(createHash('sha256').update(text).digest('hex'), 'e36be1913a9bec5a42d33331074112d1acd5aab776c62272a5bdb714116a184f');
   const fixtureHook = JSON.parse(text).hooks.PreToolUse[0];
   const tracked = JSON.parse(fs.readFileSync(path.join(root, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0];
   assert.equal(fixtureHook.matcher, tracked.matcher);
@@ -323,16 +342,27 @@ test('fixture registration embeds the tracked kit hook unchanged and matches its
   const { command: trackedCommand, ...trackedRest } = tracked.hooks[0];
   assert.deepEqual(rest, trackedRest);
   assert.ok(command.includes(`( ${trackedCommand} ) < "$receipt/input.json"`), 'the tracked command must run verbatim in a subshell');
-  assert.match(command, /^case "\$\{CODEX_SMOKE_RECEIPT_DIR:-\}" in \/\*\) ;; \*\) printf/);
+  assert.match(command, /^umask 077; case "\$\{CODEX_SMOKE_RECEIPT_DIR:-\}" in \/\*\) ;; \*\) printf/);
   assert.match(command, /mkdir "\$receipt" \|\|/);
   assert.doesNotMatch(command, /rm |ln |-f |chmod|>>/);
   // Without a receipt directory the adapter fails closed and executes nothing.
-  const r = spawnSync('/bin/sh', ['-lc', command], { env: { PATH: '/usr/bin:/bin' }, input: '{}', encoding: 'utf8' });
+  const r = spawnSync('/bin/sh', ['-c', command], { env: { PATH: '/usr/bin:/bin' }, input: '{}', encoding: 'utf8' });
   assert.equal(r.status, 2);
   assert.match(r.stderr, /^agent-guard unavailable: smoke receipt directory is not configured/);
-  const relative = spawnSync('/bin/sh', ['-lc', command], { env: { PATH: '/usr/bin:/bin', CODEX_SMOKE_RECEIPT_DIR: 'relative' }, input: '{}', encoding: 'utf8' });
+  const relative = spawnSync('/bin/sh', ['-c', command], { env: { PATH: '/usr/bin:/bin', CODEX_SMOKE_RECEIPT_DIR: 'relative' }, input: '{}', encoding: 'utf8' });
   assert.equal(relative.status, 2);
   assert.equal(fs.existsSync(path.join(root, 'relative')), false);
+  // Any other exit from the wrapped subshell (here forced in place of the tracked command)
+  // is the adapter's own failure: recorded raw, reported as unavailable and blocking (2).
+  for (const [shell, ...flags] of hookShells) {
+    const receipts = fs.mkdtempSync(path.join(tmp, 'adapter-failure-'));
+    const failing = command.replace(trackedCommand, 'exit 7');
+    const failed = spawnSync(shell, [...flags, failing], { env: { PATH: '/usr/bin:/bin', CODEX_SMOKE_RECEIPT_DIR: receipts }, input: '{}', encoding: 'utf8' });
+    assert.equal(failed.status, 2, shell);
+    assert.equal(failed.stderr, 'agent-guard unavailable: smoke adapter failed\n', shell);
+    const [call] = fs.readdirSync(receipts);
+    assert.equal(fs.readFileSync(path.join(receipts, call, 'exit'), 'utf8'), '7\n', shell);
+  }
 });
 
 test('revalidation distinguishes real denials from unavailable guards, missing, duplicate and wrong-command receipts', () => {
@@ -384,14 +414,57 @@ test('revalidation distinguishes real denials from unavailable guards, missing, 
     assert.equal(r.status, 1, `${name}: ${output(r)}`);
     assert.match(r.stderr, expected, name);
   }
-  const allowPass = revalidate(runDir('allow-pass', { receipts: [{ exit: 0, input: { tool_input: { command: allow } } }],
-    stderr: 'hook: PreToolUse\nhook: PreToolUse Completed\nexec\ngit status --short in /x\n succeeded:\nCODEX_SMOKE_ALLOW_EXECUTED\n' }), 'guard-allow-git-status');
-  assert.equal(allowPass.status, 0, output(allowPass));
+  // v0.165 renders a command item as "exec", then shlex_join([shell, -c|-lc, command])
+  // " in " cwd, then a status line and the output (event_processor_with_human_output.rs).
+  // shlex 1.3.0 double-quotes this command (it contains ' and \), escaping the backslash.
+  const shlex = `/usr/bin/zsh -lc "git status --short && printf '%s\\\\n' CODEX_SMOKE_ALLOW_EXECUTED"`;
+  const allowed = 'hook: PreToolUse\nhook: PreToolUse Completed\n';
+  const item = (rendered = `/bin/bash -c ${shQuote(allow)}`, cwd = fx.repo, status = ' succeeded in 12ms:', out = 'CODEX_SMOKE_ALLOW_EXECUTED\n') =>
+    `exec\n${rendered} in ${cwd}\n${status}\n${out}`;
+  const allowReceipt = [{ exit: 0, input: { tool_input: { command: allow } } }];
+  for (const [name, stderr] of [
+    ['posix-quoted', `${allowed}${item()}\ncodex\nDone.\ntokens used\n1,234\n`],
+    ['shlex-quoted', `${allowed}${item(shlex, fx.repo, ' succeeded:')}`],
+  ]) {
+    const allowPass = revalidate(runDir(`allow-pass-${name}`, { receipts: allowReceipt, stderr }), 'guard-allow-git-status');
+    assert.equal(allowPass.status, 0, `${name}: ${output(allowPass)}`);
+  }
+  // The marker must come from the one rendered command item for the exact command, cwd
+  // and a succeeded status, never from model text after a "codex" agent-message line.
+  for (const [name, stderr, expected] of [
+    ['narrative-only', `${allowed}codex\nThe expected marker was:\nCODEX_SMOKE_ALLOW_EXECUTED\n`, /0 command items/],
+    ['exited-128', `${allowed}${item(undefined, undefined, ' exited 128:', 'fatal: simulated sandbox failure\n')}codex\nCODEX_SMOKE_ALLOW_EXECUTED\n`, /did not succeed/],
+    ['declined', `${allowed}${item(undefined, undefined, ' declined:', 'CODEX_SMOKE_ALLOW_EXECUTED\n')}`, /did not succeed/],
+    ['other-command', `${allowed}${item(`/bin/bash -c ${shQuote(`${allow}; true`)}`)}`, /not the scenario command/],
+    ['bare-command', `${allowed}${item(allow)}`, /not the scenario command/],
+    ['other-shell', `${allowed}${item(`/tmp/evil/bash-ish -c ${shQuote(allow)}`)}`, /not the scenario command/],
+    ['other-cwd', `${allowed}${item(undefined, fx.isolation)}`, /did not run in the disposable repository/],
+    ['marker-after-agent', `${allowed}${item(undefined, undefined, undefined, '')}codex\nCODEX_SMOKE_ALLOW_EXECUTED\n`, /lacks the allow marker line/],
+    ['item-after-agent', `${allowed}codex\nRunning it now.\n${item()}`, /0 command items/],
+    ['forged-before-agent', `${allowed}${item()}codex\n${item(undefined, undefined, ' exited 1:', '')}`, /renders the scenario command 2 times/],
+    ['two-items', `${allowed}${item()}${item(`/bin/bash -c ${shQuote('true')}`)}`, /2 command items/],
+    ['dangling-status', `${allowed}${item()} succeeded:\n`, /status line outside a rendered command item/],
+    ['no-status', `${allowed}exec\n/bin/bash -c ${shQuote(allow)} in ${fx.repo}\nCODEX_SMOKE_ALLOW_EXECUTED\n`, /did not succeed/],
+    ['hook-after-agent', `codex\n${allowed}${item()}`, /lacks the "hook: PreToolUse Completed"/],
+  ]) {
+    const r = revalidate(runDir(`allow-${name}`, { receipts: allowReceipt, stderr }), 'guard-allow-git-status');
+    assert.equal(r.status, 1, `${name}: ${output(r)}`);
+    assert.match(r.stderr, expected, name);
+  }
+  for (const [name, stderr, expected] of [
+    ['deny-with-item', `${blocked}exec\n/bin/bash -c ${shQuote(deny)} in ${fx.repo}\n exited 1:\n`, /renders the scenario command|command item/],
+    ['deny-other-item', `${blocked}${item(`/bin/bash -c ${shQuote('true')}`)}`, /1 command item/],
+    ['deny-blocked-after-agent', `hook: PreToolUse\ncodex\nhook: PreToolUse Blocked\n`, /lacks the "hook: PreToolUse Blocked"/],
+  ]) {
+    const r = revalidate(runDir(name, { receipts: [{ exit: 2, stderr: policy }], stderr }));
+    assert.equal(r.status, 1, `${name}: ${output(r)}`);
+    assert.match(r.stderr, expected, name);
+  }
   const allowDenied = revalidate(runDir('allow-denied', { receipts: [{ exit: 2, stderr: policy, input: { tool_input: { command: allow } } }], stderr: blocked }), 'guard-allow-git-status');
   assert.equal(allowDenied.status, 1, output(allowDenied));
   assert.match(allowDenied.stderr, /guard exit 2 is not an allow/);
   const allowNoMarker = revalidate(runDir('allow-no-marker', { receipts: [{ exit: 0, input: { tool_input: { command: allow } } }],
-    stderr: 'hook: PreToolUse\nhook: PreToolUse Completed\n' }), 'guard-allow-git-status');
+    stderr: `${allowed}${item(undefined, undefined, undefined, '')}` }), 'guard-allow-git-status');
   assert.equal(allowNoMarker.status, 1, output(allowNoMarker));
   assert.match(allowNoMarker.stderr, /lacks the allow marker/);
   // Receipt entries must be regular single-link files; links and extras are refused.
@@ -412,6 +485,88 @@ test('revalidation distinguishes real denials from unavailable guards, missing, 
     assert.equal(r.status, 2, output(r));
     assert.match(r.stderr, expected);
   }
+});
+
+test('QA round 5 repro: a cloned passing allow run with model narrative or a failed item fails revalidation', () => {
+  const fx = fixture('qa-r5-allow-clone');
+  const first = run(fx);
+  assert.equal(first.status, 0, output(first));
+  const [passing] = runDirs(fx);
+  const allow = "git status --short && printf '%s\\n' CODEX_SMOKE_ALLOW_EXECUTED";
+  const hooks = 'hook: PreToolUse\nhook: PreToolUse Completed\n';
+  const narrative = 'codex\nThe command failed. Expected marker was:\nCODEX_SMOKE_ALLOW_EXECUTED\n';
+  const revalidate = (dir) => spawnSync(runner, ['--owner-approved', '--revalidate', '--run-dir', dir, '--repo', fx.repo,
+    '--scenario', 'guard-allow-git-status'], { encoding: 'utf8', env: baseEnv });
+  const original = revalidate(passing);
+  assert.equal(original.status, 0, output(original));
+  for (const [name, stderr] of [
+    ['exited-128', `${hooks}exec\n${allow} in ${fx.repo}\n exited 128:\nfatal: simulated sandbox failure\n${narrative}`],
+    ['exited-128-wrapped', `${hooks}exec\n/bin/bash -c ${shQuote(allow)} in ${fx.repo}\n exited 128:\nfatal: simulated sandbox failure\n${narrative}`],
+    ['narrative-only', `${hooks}${narrative}`],
+  ]) {
+    const clone = path.join(fx.isolation, `clone-${name}`);
+    fs.cpSync(passing, clone, { recursive: true });
+    fs.writeFileSync(path.join(clone, 'codex.stderr'), stderr);
+    const r = revalidate(clone);
+    assert.equal(r.status, 1, `${name}: ${output(r)}`);
+    assert.doesNotMatch(r.stdout, /evidence PASS/, name);
+  }
+});
+
+// The runner's own shell functions, run with a substituted node binary: a namespace-free
+// check that identity and sentinel failures refuse even where /usr/bin/node exists.
+function runnerHarness(nodeBinary, body) {
+  const text = fs.readFileSync(runner, 'utf8');
+  const functions = ['die', 'verify_node', 'require_sentinel', 'fixture_hooks', 'generate_fixture_hooks',
+    'validate_run_node', 'validate_run'].map((name) => {
+    const start = text.indexOf(`\n${name}() {\n`) + 1;
+    assert.ok(start > 0, name);
+    const plainEnd = text.indexOf('\n}\n', start);
+    const heredoc = text.indexOf("<<'NODE'", start);
+    return text.slice(start, heredoc !== -1 && heredoc < plainEnd
+      ? text.indexOf('\nNODE\n}\n', start) + '\nNODE\n}\n'.length : plainEnd + '\n}\n'.length);
+  }).join('');
+  const pin = text.match(/^fixture_hooks_sha256=[0-9a-f]{64}$/m)[0];
+  const script = `set -euo pipefail\n${functions}${pin}\nreal_node=${shQuote(nodeBinary)}\n${body}\n`;
+  return spawnSync('/bin/bash', ['-c', script], { encoding: 'utf8', env: { PATH: '/usr/bin:/bin' } });
+}
+
+test('node identity and success sentinels refuse a binary that only exits 0', () => {
+  const fx = fixture('sentinel');
+  const first = run(fx);
+  assert.equal(first.status, 0, output(first));
+  const [passing] = runDirs(fx);
+  const allow = "git status --short && printf '%s\\n' CODEX_SMOKE_ALLOW_EXECUTED";
+  const validate = `validate_run ${shQuote(passing)} ${shQuote(fx.repo)} guard-allow-git-status ${shQuote(allow)}; echo reached`;
+  const bin = path.join(tmp, 'sentinel-bin');
+  fs.mkdirSync(bin);
+  for (const name of ['true', 'false']) {
+    fs.copyFileSync(`/usr/bin/${name}`, path.join(bin, name));
+    fs.chmodSync(path.join(bin, name), 0o755);
+  }
+  executable(path.join(bin, 'wrong-identity'), '#!/bin/sh\nprintf codex-smoke-node:1.2.3:41\n');
+  executable(path.join(bin, 'wrong-hooks'), '#!/bin/sh\nprintf "{}\\ncodex-smoke: fixture hooks generated\\n"\n');
+  const fakeTrue = path.join(bin, 'true');
+  for (const [name, nodeBinary, body, status, expected] of [
+    ['identity-true', fakeTrue, 'verify_node; echo reached', 2, /not a working Node\.js binary/],
+    ['identity-false', path.join(bin, 'false'), 'verify_node; echo reached', 2, /node identity check failed/],
+    ['identity-wrong', path.join(bin, 'wrong-identity'), 'verify_node; echo reached', 2, /not a working Node\.js binary/],
+    ['hooks-silent', fakeTrue, 'generate_fixture_hooks; echo reached', 2, /fixture hook generation did not report success/],
+    ['hooks-unpinned', path.join(bin, 'wrong-hooks'), 'generate_fixture_hooks; echo reached', 2, /does not match its reviewed pin/],
+    ['validate-silent', fakeTrue, validate, 2, /did not report success \(codex-smoke: evidence PASS/],
+    ['validate-false', path.join(bin, 'false'), validate, 1, /^$/],
+  ]) {
+    const r = runnerHarness(nodeBinary, body);
+    assert.equal(r.status, status, `${name}: ${output(r)}`);
+    assert.match(r.stderr, expected, name);
+    assert.doesNotMatch(r.stdout, /reached|evidence PASS/, name);
+  }
+  const real = runnerHarness(nodeReal, `verify_node; generate_fixture_hooks; printf '%s' "$fixture_hooks_json"`);
+  assert.equal(real.status, 0, output(real));
+  assert.equal(real.stdout, fixtureHooks());
+  const pass = runnerHarness(nodeReal, validate);
+  assert.equal(pass.status, 0, output(pass));
+  assert.match(pass.stdout, /^codex-smoke: evidence PASS \(guard-allow-git-status\): .*\nreached\n$/);
 });
 
 test('direct entry ignores caller BASH_ENV, exported functions and shell options', () => {
@@ -576,6 +731,35 @@ test('without system node a shim, script or in-root caller PATH node is refused 
     assert.equal(fs.existsSync(path.join(fx.codexHome, 'config.toml')), false, name);
     assert.equal(fs.existsSync(fx.record), false, name);
   }
+});
+
+test('without system node a non-node ELF named node is refused before any check, trust or launch', { skip: fallbackSkip() }, () => {
+  // QA round 5: a /usr/bin/true copy named node used to pass every Node check vacuously.
+  const fake = path.join(tmp, 'fake-node-bin');
+  fs.mkdirSync(fake);
+  fs.copyFileSync('/usr/bin/true', path.join(fake, 'node'));
+  fs.chmodSync(path.join(fake, 'node'), 0o755);
+  const callerPath = `${fake}:${nodeDir}:/usr/bin:/bin`;
+  const profile = fixture('fake-node-profile');
+  const config = path.join(profile.codexHome, 'config.toml');
+  fs.writeFileSync(config, '[profiles.evil]\nsandbox_mode = "danger-full-access"\n');
+  const stub = fixture('fake-node-stub');
+  const marker = path.join(tmp, 'fake-node-stub-marker');
+  executable(path.join(stub.stubBin, 'codex'), `#!/bin/sh\nprintf ran > ${shQuote(marker)}\n`);
+  executable(path.join(stub.stubBin, 'extra'), '#!/bin/sh\nexit 0\n');
+  for (const [name, fx] of [['forbidden-profile', profile], ['arbitrary-in-root-codex', stub]]) {
+    const r = runWithoutSystemNode(fx, fx.args, callerPath);
+    assert.equal(r.status, 2, `${name}: ${output(r)}`);
+    assert.match(r.stderr, /resolved node is not a working Node\.js binary/, name);
+    assert.deepEqual(runDirs(fx), [], `${name}: nothing may be launched`);
+    assert.equal(fs.existsSync(fx.record), false, name);
+  }
+  assert.equal(fs.readFileSync(config, 'utf8'), '[profiles.evil]\nsandbox_mode = "danger-full-access"\n');
+  assert.equal(fs.existsSync(path.join(stub.codexHome, 'config.toml')), false);
+  assert.equal(fs.existsSync(marker), false);
+  const printed = runWithoutSystemNode(profile, ['--owner-approved', '--print-fixture-hooks'], callerPath);
+  assert.equal(printed.status, 2, output(printed));
+  assert.equal(printed.stdout, '');
 });
 
 test('only API-key-only isolated auth is accepted after separate native/model declarations', () => {
