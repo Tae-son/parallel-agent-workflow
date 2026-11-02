@@ -95,8 +95,14 @@ Codex arguments, profiles, config overrides, working-directory changes and serve
 refused. It requires
 a marked disposable root, a clean standalone Git repository with no remotes, isolated
 `HOME` and `CODEX_HOME`, a harmless `gh` stub and a scrubbed child environment. It refuses
-Codex configuration and rule files, remote-capable Git config, legacy remote definitions,
-and symlinks or hardlinks in isolated state. It invokes only an ephemeral, read-only `exec`
+caller-supplied Codex configuration and rule files, executable or remote-capable Git config,
+legacy remote definitions, and symlinks, hardlinks or special files in isolated state.
+For the exact guard fixture it creates or verifies one content-pinned trust file inside the
+disposable `CODEX_HOME`: one project path and one exact hook hash, after checking the
+registration and guard script bytes. Other hooks, profiles, config and host-managed Codex
+state are refused. See `docs/agent-support.md` for the v0.165 contract, exact fixture layout,
+and native evidence requirements. Execute the runner directly so its privileged Bash startup
+ignores caller shell initialization. It invokes only an ephemeral, read-only `exec`
 with closed stdin. Its `--owner-approved` declaration is procedural evidence, not
 authenticated consent, so the owner's written approval remains the authority.
 

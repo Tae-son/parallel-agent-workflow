@@ -26,7 +26,11 @@ Agents may run Codex smoke tests only when the owner explicitly approves the exa
 its isolation boundaries. Use only `scripts/codex-smoke.sh`, which requires a marked
 disposable root, a clean repository without remotes, isolated `HOME`/`CODEX_HOME`, harmless
 command stubs and a scrubbed environment. It accepts only named allowlisted scenarios, never
-arbitrary Codex arguments or config. The runner declaration is not authenticated owner
+arbitrary Codex arguments or config. For the pinned guard fixture only, it creates or verifies
+one exact project/hook trust artifact in the disposable `CODEX_HOME`; all other trust and
+config is refused. Follow `docs/agent-support.md` for the required fixture layout and native
+evidence. Execute the runner directly to preserve its protected Bash startup.
+The runner declaration is not authenticated owner
 consent; retain the written approval. The exception never permits merging, pushing to
 `main`, force-pushing, owner-only review scripts, normal-profile or live-T3 changes, trust or
 sandbox bypasses, dependency installation, or paid model calls without separate approval.

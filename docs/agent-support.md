@@ -71,38 +71,123 @@ declared disposable root, repository, isolated homes, stubs and named scenario. 
 authenticate owner approval; it makes the approved exception explicit and auditable while
 the written owner instruction remains authoritative.
 
-The runner exposes exactly two scenarios:
+The runner exposes exactly two scenarios, each requesting one shell tool call:
 
-- `--scenario guard-allow-git-status` asks Codex to run only `git status --short`.
-- `--scenario guard-block-main-push` asks Codex to attempt only `git push origin main` so
-  the guard's denial can be observed without a configured remote.
+- `--scenario guard-allow-git-status` requests
+  `git status --short && printf '%s\n' CODEX_SMOKE_ALLOW_EXECUTED`.
+  Require success and that marker in the actual tool stdout.
+- `--scenario guard-block-main-push` requests
+  `printf '%s\n' CODEX_SMOKE_DENY_PAYLOAD_EXECUTED; git push origin main`.
+  Require the `PreToolUse` denial beginning
+  `agent-guard: pushing to main is owner-only` and no payload stdout. The marker precedes
+  Git, so missing remotes cannot explain its absence. A Git/sandbox/auth error, model
+  refusal or unattempted tool call does not pass. Text copied from the prompt or a model's
+  final answer is not execution evidence; inspect the tool result.
 
 Arbitrary Codex arguments are refused. Each scenario expands to a fixed non-interactive
-`exec` invocation with strict config handling, ephemeral session state, ignored user config
-and rule files, the read-only sandbox, deterministic color and closed stdin. Profiles,
-inline config, cwd and writable-root expansion, alternate subcommands, server modes, model
-selection and output paths are therefore outside the accepted command surface.
+`exec --strict-config --ephemeral --ignore-rules --sandbox read-only --color never -- PROMPT`
+with closed stdin. No profile, inline config, cwd/writable-root expansion, alternate
+subcommand, server mode, model selection or output path is accepted.
 
-The runner requires all boundary paths to be absolute. It accepts only a marked disposable
-root; a clean standalone Git repository and Git metadata inside that root with no remotes;
-separate isolated `HOME` and `CODEX_HOME`; and an executable, nonsymlinked harmless `gh`
-stub. The child receives a scrubbed environment with isolated XDG, GitHub, Git and temporary
-state. The complete disposable root must be free of symlinks and hardlinks. Normal
-credentials and the caller's PATH are not inherited. All Codex config and rule files are
-refused rather than parsed, including profile files and nested project config. Named,
-worktree-scoped and legacy Git remote definitions, URL rewrites and config includes are
-refused. The runner neither grants project/hook trust nor changes normal profiles or live
-T3 settings.
+#### Exact disposable trust, pinned to v0.165.0
 
-Fixture mode requires the selected executable to resolve inside the disposable root; tests
-place a harmless stub there. Location alone does not authenticate a binary as harmless, so
-the owner must review the exact fixture executable and command. Native mode, where the binary
-is outside that root, additionally requires `--native`,
-`--model-call-approved`, `CODEX_SMOKE_NATIVE_APPROVED=1` and
-`CODEX_SMOKE_MODEL_CALL_APPROVED=1`. These declarations deliberately force a separate owner
-decision because native activation can use network/model capacity; they are still procedural,
-not authentication. Do not install dependencies, copy production credentials, relax the
-sandbox or grant trust unless the owner separately approves that exact action.
+Unlike the earlier runner, this command deliberately loads its isolated User layer.
+`--ignore-user-config` would discard the project and hook trust needed to load the guard.
+The runner creates only `CODEX_HOME/config.toml`, with these exact two tables (the example
+path is replaced with the canonical disposable repository path):
+
+```toml
+[projects."/exact/disposable/repo"]
+trust_level = "trusted"
+
+[hooks.state."/exact/disposable/repo/.codex/hooks.json:pre_tool_use:0:0"]
+trusted_hash = "sha256:0352a4a632e84ccc9c4e15e3157aa949eb21f2835480a8db7b461a97f8cb6182"
+```
+
+This is ordinary exact-hook trust, not a bypass. Project trust enables discovery of the
+one `.codex/hooks.json`; hook state authorizes its one synchronous `^Bash$` command handler.
+The hook feature and handler enablement default to enabled in v0.165, so no enablement,
+inline hook, sandbox or provider setting is needed. The state key is the absolute source
+path plus `:pre_tool_use:0:0`, without a `file:` prefix. The hash is SHA-256 of recursively
+sorted, compact JSON for the normalized TOML identity: `event_name = "pre_tool_use"`,
+`matcher = "^Bash$"`, and the single command handler with `async = false`, `timeout = 10`
+and `type = "command"`. Absent optional fields are omitted through TOML serialization.
+
+Before creating trust, the runner checks the entire hook file against SHA-256
+`58feb368fdbb77d268fec9b40161e2ccd0d172cbae40ea1d19a0e79bcac8fb5a`
+and the shared guard script against
+`e7462097ed76c62691050b0f7e99fc9ed693166c14ca623db70033135983a4a2`.
+The second pin matters: Codex hashes the hook declaration, not that script's contents.
+These are reviewed constants, never caller-supplied hashes. Changing either file requires
+a reviewed runner update. An existing trust file must match the generated bytes exactly;
+it is never merged, parsed into permissive defaults or overwritten. New files are created
+exclusively with mode 0600. Reusing the artifact for another repository path fails.
+
+Source contract: v0.165
+[`loader/mod.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/config/src/loader/mod.rs)
+loads project trust from preceding layers, including User, and discovers a project's
+`.codex` layer even without project `config.toml`;
+[`config_rules.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/hooks/src/config_rules.rs)
+accepts hook state only from User/SessionFlags;
+[`hooks/src/lib.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/hooks/src/lib.rs),
+[`discovery.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/hooks/src/engine/discovery.rs),
+[`protocol/hooks.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/protocol/src/hooks.rs)
+and [`fingerprint.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/config/src/fingerprint.rs)
+define the state key and normalized hash. This source analysis establishes a viable trust
+mechanism; it does not establish native activation on a particular binary or host.
+
+#### Required isolation and activation evidence
+
+Use Linux with `/bin/bash`, `/usr/bin/node` and system Git. Execute the script directly
+(or with `/bin/bash -p`); its privileged Bash startup ignores `BASH_ENV`, exported
+functions and inherited shell options before the script is read. Plain `bash script`
+is refused; its interpreter could already have run caller startup code before refusal.
+The runner is not a boundary against a process that can modify it or race its checks.
+
+Prepare absolute, canonical, nonoverlapping repository/home/stub directories under a
+root marked `.codex-smoke-disposable`. Initialize a standalone repository using an empty
+Git template and commit only the exact `.codex/hooks.json` and
+`.claude/hooks/agent-guard.mjs` from this kit, plus an optional `README.md`. The repository
+must be clean. No other project files, configuration, instructions, hooks, rules, linked
+worktrees, alternates, remotes, URL rewrites or Git includes are accepted. Local Git config
+is limited to the four ordinary `git init` core keys; executable settings such as
+`core.fsmonitor` are refused before any repository-aware Git operation. Git hooks and
+fsmonitor are also disabled in the scrubbed preflight/child environment.
+
+Keep isolated `HOME` free of files and `CODEX_HOME` empty except for an exact existing
+trust artifact and, only in separately approved native mode, optional isolated
+`auth.json` containing solely an `OPENAI_API_KEY` string. Do not copy production
+credentials. ChatGPT identity, normal profiles, cached cloud policy, user hooks, plugins,
+other config and special files are refused. API-key-only auth cannot fetch workspace
+managed config in the referenced
+[`exec` bootstrap](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/exec/src/lib.rs).
+The runner refuses any `/etc/codex` path, including system/managed config, requirements
+and system hooks; it does not edit or bypass managed policy. Use an owner-prepared isolated
+host if managed state exists. Scrubbing credentials does not hide files: the read-only
+sandbox still permits reads. An approved native run needs an environment with no sensitive
+host files accessible to it, and separate model/network authorization.
+
+The entire disposable root must contain only directories and regular, single-link files.
+Symlinks, hardlinks and special files are refused before writing, preserving outside
+victims. XDG, GitHub, Git and temporary state remain under that root; caller credentials,
+PATH and environment are not inherited. `--stub-bin` contains only the exact harmless
+`gh` stub (`#!/bin/sh`, print `harmless gh stub` to stderr, exit 97) and, in fixture mode,
+the exact recording `codex` stub defined in `tests/codex-smoke.test.mjs`. Location alone
+does not authenticate a binary as harmless; the runner also compares those complete
+stub contents and refuses additional executables.
+
+Native mode requires a reviewed resolved ELF executable outside the root, plus
+`--native`, `--model-call-approved`, `CODEX_SMOKE_NATIVE_APPROVED=1` and
+`CODEX_SMOKE_MODEL_CALL_APPROVED=1`. Script wrappers, including mise shims that could
+install a missing runtime, are refused. ELF format is not binary authentication or a
+version check; the owner must review the actual executable and v0.165 compatibility.
+The declarations force separate activation/model decisions but do not authenticate
+consent. Normal profiles, external trust and live T3 settings are never changed.
+
+Preserve actual tool results for both scenarios, the binary version/identity, execution
+surface, exact generated trust bytes and hook/guard pins. Runner or Codex exit zero alone
+is not a guard PASS. A later separately approved native run must supply this evidence;
+this PR's implementation and QA use harmless fixtures and source review only.
 
 The fixture tests exercise runner allow/deny behavior with harmless stubs; fixture tests do
 not prove native activation. They also do not prove that Codex loaded the project hook or
