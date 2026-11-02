@@ -37,6 +37,23 @@ function executable(file, content) {
   fs.writeFileSync(file, content, { mode: 0o755 });
 }
 
+// The disposable repository commits the runner's printed fixture registration: the
+// tracked kit hook command wrapped in the receipt adapter (see docs/agent-support.md).
+let fixtureHooksCache;
+function fixtureHooks() {
+  if (fixtureHooksCache === undefined) {
+    const r = spawnSync(runner, ['--print-fixture-hooks'], { encoding: 'utf8', env: baseEnv });
+    assert.equal(r.status, 0, output(r));
+    fixtureHooksCache = r.stdout;
+  }
+  return fixtureHooksCache;
+}
+
+function runDirs(fx) {
+  const runs = path.join(fx.isolation, 'runs');
+  return fs.existsSync(runs) ? fs.readdirSync(runs).sort().map((name) => path.join(runs, name)) : [];
+}
+
 function fixture(name) {
   const isolation = path.join(tmp, name);
   const repo = path.join(isolation, 'repo');
@@ -53,7 +70,7 @@ function fixture(name) {
   fs.writeFileSync(path.join(repo, 'README.md'), 'fixture\n');
   fs.mkdirSync(path.join(repo, '.codex'));
   fs.mkdirSync(path.join(repo, '.claude/hooks'), { recursive: true });
-  fs.copyFileSync(path.join(root, '.codex/hooks.json'), path.join(repo, '.codex/hooks.json'));
+  fs.writeFileSync(path.join(repo, '.codex/hooks.json'), fixtureHooks());
   fs.copyFileSync(path.join(root, '.claude/hooks/agent-guard.mjs'), path.join(repo, '.claude/hooks/agent-guard.mjs'));
   git(repo, 'add', '.');
   git(repo, '-c', 'commit.gpgsign=false', 'commit', '-qm', 'fixture');
@@ -67,7 +84,23 @@ function fixture(name) {
     printf 'args=%s\\n' "$*"
     if IFS= read -r line; then printf 'stdin=%s\\n' "$line"; else printf 'stdin=closed\\n'; fi
     if [ "\${OPENAI_API_KEY+x}" = x ]; then printf 'credential=LEAKED\\n'; else printf 'credential=absent\\n'; fi
-  } > ${shQuote(record)}\n`);
+  } > ${shQuote(record)}
+exec node - "$@" <<'STUB'
+const fs = require('node:fs');
+const { spawnSync } = require('node:child_process');
+const prompt = process.argv[process.argv.length - 1];
+const command = prompt.split('with this exact command:\\n')[1].split('\\nReport')[0];
+const hook = JSON.parse(fs.readFileSync('.codex/hooks.json', 'utf8')).hooks.PreToolUse[0].hooks[0].command;
+const input = JSON.stringify({ session_id: 'fixture-session', turn_id: 'fixture-turn', cwd: process.cwd(),
+  hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command }, tool_use_id: 'fixture-call' });
+process.stderr.write('hook: PreToolUse\\n');
+const decision = spawnSync('/bin/sh', ['-lc', hook], { input, encoding: 'utf8' });
+if (decision.status === 2 && decision.stderr.trim()) { process.stderr.write('hook: PreToolUse Blocked\\n'); process.exit(0); }
+process.stderr.write(decision.status === 0 ? 'hook: PreToolUse Completed\\n' : 'hook: PreToolUse Failed\\n');
+const run = spawnSync('/bin/sh', ['-c', command], { encoding: 'utf8' });
+process.stderr.write(\`exec\\n\${command} in \${process.cwd()}\\n\${run.status === 0 ? ' succeeded' : \` exited \${run.status}\`}:\\n\${run.stdout}\${run.stderr}\`);
+STUB
+`);
   const args = [
     '--owner-approved',
     '--isolation-root', isolation,
@@ -118,7 +151,7 @@ function expectedTrust(fx) {
   const identity = { event_name: 'pre_tool_use', hooks: [{ async: false,
     command: hook.command, timeout: 10, type: 'command' }], matcher: '^Bash$' };
   const hash = `sha256:${createHash('sha256').update(JSON.stringify(identity)).digest('hex')}`;
-  assert.equal(hash, 'sha256:0352a4a632e84ccc9c4e15e3157aa949eb21f2835480a8db7b461a97f8cb6182');
+  assert.equal(hash, 'sha256:ee2d53bea894561e06cb1124d19a5e791d6d7e2153986b5c07e4600abb47e159');
   return `[projects.${JSON.stringify(fx.repo)}]\ntrust_level = "trusted"\n\n` +
     `[hooks.state.${JSON.stringify(`${fx.repo}/.codex/hooks.json:pre_tool_use:0:0`)}]\ntrusted_hash = "${hash}"\n`;
 }
@@ -142,7 +175,7 @@ test('runner refuses changed, expanded or relocated trust without overwriting it
   for (const [name, mutate] of [
     ['repo', (text) => text.replaceAll('/repo', '/other-repo')],
     ['broad-project', (text) => text.replaceAll('/repo', '')],
-    ['hash', (text) => text.replace('0352a4', '1352a4')],
+    ['hash', (text) => text.replace('ee2d53', '1e2d53')],
     ['extra-hook', (text) => `${text}\n[[hooks.SessionStart]]\n[[hooks.SessionStart.hooks]]\ntype = "command"\ncommand = "touch /tmp/must-not-run"\n`],
     ['extra-config', (text) => `sandbox_mode = "danger-full-access"\n${text}`],
     ['profile', (text) => `profile = "smoke"\n${text}`],
@@ -185,7 +218,14 @@ test('runner pins the entire hook registration and guard bytes before creating t
 
 test('trust cannot be replayed after moving the repository and quoted paths stay exact', () => {
   const fx = fixture('space quote\' backslash\\ unicode-λ');
-  assert.equal(run(fx).status, 0);
+  const first = run(fx);
+  // Node refuses ESM specifiers containing a backslash, so the unchanged registration
+  // fails closed here: a recorded guard exit 2 that the validator must not count as allow.
+  assert.equal(first.status, 1, output(first));
+  assert.match(output(first), /guard exit 2 is not an allow/);
+  const [firstRun] = runDirs(fx);
+  const [call] = fs.readdirSync(path.join(firstRun, 'receipts'));
+  assert.match(fs.readFileSync(path.join(firstRun, 'receipts', call, 'stderr'), 'utf8'), /ERR_INVALID_MODULE_SPECIFIER[^]*agent-guard unavailable: command check failed\n$/);
   const config = path.join(fx.codexHome, 'config.toml');
   const original = fs.readFileSync(config, 'utf8');
   assert.equal(original, expectedTrust(fx));
@@ -196,7 +236,7 @@ test('trust cannot be replayed after moving the repository and quoted paths stay
   assert.deepEqual(JSON.parse(parsed.stdout), {
     projects: { [fx.repo]: { trust_level: 'trusted' } },
     hooks: { state: { [`${fx.repo}/.codex/hooks.json:pre_tool_use:0:0`]: {
-      trusted_hash: 'sha256:0352a4a632e84ccc9c4e15e3157aa949eb21f2835480a8db7b461a97f8cb6182',
+      trusted_hash: 'sha256:ee2d53bea894561e06cb1124d19a5e791d6d7e2153986b5c07e4600abb47e159',
     } } },
   });
   const moved = path.join(fx.isolation, 'moved-repo');
@@ -211,28 +251,157 @@ test('trust cannot be replayed after moving the repository and quoted paths stay
 });
 
 test('fixed scenario commands exercise the exact pinned hook with distinct allow and deny evidence', () => {
+  const hook = JSON.parse(fixtureHooks()).hooks.PreToolUse[0].hooks[0];
   for (const scenario of ['guard-allow-git-status', 'guard-block-main-push']) {
     const fx = fixture(`dispatch-${scenario}`);
     const args = fx.args.map((arg) => arg === 'guard-allow-git-status' ? scenario : arg);
     const r = run(fx, args);
     assert.equal(r.status, 0, output(r));
+    assert.match(r.stdout, new RegExp(`^codex-smoke: evidence PASS \\(${scenario}\\)`, 'm'));
     const recorded = fs.readFileSync(fx.record, 'utf8');
     const command = recorded.split('with this exact command:\n')[1].split('\nReport')[0];
-    const hook = JSON.parse(fs.readFileSync(path.join(fx.repo, '.codex/hooks.json'))).hooks.PreToolUse[0].hooks[0];
-    const env = { HOME: fx.home, CODEX_HOME: fx.codexHome, PATH: `${fx.stubBin}:/usr/bin:/bin`,
-      GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1', GIT_ALLOW_PROTOCOL: 'file' };
-    const decision = spawnSync('/bin/sh', ['-c', hook.command], { cwd: fx.repo, env, encoding: 'utf8',
-      input: JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd: fx.repo }) });
+    const [runDir, ...more] = runDirs(fx);
+    assert.equal(more.length, 0);
+    assert.deepEqual(fs.readdirSync(runDir).sort(), ['codex.status', 'codex.stderr', 'codex.stdout', 'receipts']);
+    assert.equal(fs.readFileSync(path.join(runDir, 'codex.status'), 'utf8'), '0\n');
+    assert.equal(fs.statSync(path.join(runDir, 'codex.stderr')).mode & 0o777, 0o600);
+    const calls = fs.readdirSync(path.join(runDir, 'receipts'));
+    assert.equal(calls.length, 1);
+    const receipt = path.join(runDir, 'receipts', calls[0]);
+    assert.deepEqual(fs.readdirSync(receipt).sort(), ['exit', 'input.json', 'stderr']);
+    const input = JSON.parse(fs.readFileSync(path.join(receipt, 'input.json'), 'utf8'));
+    assert.equal(input.tool_name, 'Bash');
+    assert.equal(input.tool_input.command, command);
+    assert.equal(input.cwd, fx.repo);
+    const codexStderr = fs.readFileSync(path.join(runDir, 'codex.stderr'), 'utf8');
+    assert.match(codexStderr, /^hook: PreToolUse$/m);
     if (scenario === 'guard-allow-git-status') {
-      assert.equal(decision.status, 0, output(decision));
-      const payload = spawnSync('/bin/sh', ['-c', command], { cwd: fx.repo, env, encoding: 'utf8' });
-      assert.equal(payload.status, 0, output(payload));
-      assert.equal(payload.stdout, 'CODEX_SMOKE_ALLOW_EXECUTED\n');
+      assert.equal(fs.readFileSync(path.join(receipt, 'exit'), 'utf8'), '0\n');
+      assert.equal(fs.readFileSync(path.join(receipt, 'stderr'), 'utf8'), '');
+      assert.match(codexStderr, /^hook: PreToolUse Completed$/m);
+      assert.match(codexStderr, /^CODEX_SMOKE_ALLOW_EXECUTED$/m);
     } else {
-      assert.equal(decision.status, 2, output(decision));
-      assert.match(decision.stderr, /^agent-guard: pushing to main is owner-only/);
-      assert.equal(decision.stdout, '', 'the payload marker must never be emitted');
+      assert.equal(fs.readFileSync(path.join(receipt, 'exit'), 'utf8'), '2\n');
+      assert.match(fs.readFileSync(path.join(receipt, 'stderr'), 'utf8'), /^agent-guard: pushing to main is owner-only/);
+      assert.match(codexStderr, /^hook: PreToolUse Blocked$/m);
+      assert.doesNotMatch(codexStderr, /^CODEX_SMOKE_DENY_PAYLOAD_EXECUTED$/m, 'the payload marker must never be emitted');
     }
+    // The same registration, run directly the way v0.165 runs command hooks
+    // (/bin/sh -lc, JSON on stdin), yields the same receipt without the stub.
+    const direct = path.join(fx.isolation, `direct-${scenario}`);
+    fs.mkdirSync(direct);
+    const env = { HOME: fx.home, CODEX_HOME: fx.codexHome, CODEX_SMOKE_RECEIPT_DIR: direct,
+      PATH: `${fx.stubBin}:/usr/bin:/bin`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+    const decision = spawnSync('/bin/sh', ['-lc', hook.command], { cwd: fx.repo, env, encoding: 'utf8',
+      input: JSON.stringify({ session_id: 's', tool_name: 'Bash', tool_input: { command }, cwd: fx.repo, tool_use_id: 't' }) });
+    assert.equal(decision.stdout, '');
+    const [directCall] = fs.readdirSync(direct);
+    assert.match(directCall, /^call-[0-9]+$/);
+    assert.equal(fs.readFileSync(path.join(direct, directCall, 'exit'), 'utf8'), `${decision.status}\n`);
+    assert.equal(fs.readFileSync(path.join(direct, directCall, 'stderr'), 'utf8'), decision.stderr);
+    assert.equal(decision.status, scenario === 'guard-allow-git-status' ? 0 : 2, output(decision));
+  }
+});
+
+test('fixture registration embeds the tracked kit hook unchanged and matches its reviewed pins', () => {
+  const text = fixtureHooks();
+  assert.equal(createHash('sha256').update(text).digest('hex'), 'd99ab530aa32415a064978c7d6d055e2a6eb45525007d48d71460922cfc1e7af');
+  const fixtureHook = JSON.parse(text).hooks.PreToolUse[0];
+  const tracked = JSON.parse(fs.readFileSync(path.join(root, '.codex/hooks.json'), 'utf8')).hooks.PreToolUse[0];
+  assert.equal(fixtureHook.matcher, tracked.matcher);
+  assert.equal(fixtureHook.hooks.length, 1);
+  const { command, ...rest } = fixtureHook.hooks[0];
+  const { command: trackedCommand, ...trackedRest } = tracked.hooks[0];
+  assert.deepEqual(rest, trackedRest);
+  assert.ok(command.includes(`( ${trackedCommand} ) < "$receipt/input.json"`), 'the tracked command must run verbatim in a subshell');
+  assert.match(command, /^case "\$\{CODEX_SMOKE_RECEIPT_DIR:-\}" in \/\*\) ;; \*\) printf/);
+  assert.match(command, /mkdir "\$receipt" \|\|/);
+  assert.doesNotMatch(command, /rm |ln |-f |chmod|>>/);
+  // Without a receipt directory the adapter fails closed and executes nothing.
+  const r = spawnSync('/bin/sh', ['-lc', command], { env: { PATH: '/usr/bin:/bin' }, input: '{}', encoding: 'utf8' });
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /^agent-guard unavailable: smoke receipt directory is not configured/);
+  const relative = spawnSync('/bin/sh', ['-lc', command], { env: { PATH: '/usr/bin:/bin', CODEX_SMOKE_RECEIPT_DIR: 'relative' }, input: '{}', encoding: 'utf8' });
+  assert.equal(relative.status, 2);
+  assert.equal(fs.existsSync(path.join(root, 'relative')), false);
+});
+
+test('revalidation distinguishes real denials from unavailable guards, missing, duplicate and wrong-command receipts', () => {
+  const fx = fixture('revalidate');
+  const base = path.join(fx.isolation, 'cases');
+  fs.mkdirSync(base);
+  const deny = "printf '%s\\n' CODEX_SMOKE_DENY_PAYLOAD_EXECUTED; git push origin main";
+  const allow = "git status --short && printf '%s\\n' CODEX_SMOKE_ALLOW_EXECUTED";
+  let counter = 0;
+  function runDir(name, { receipts = [], stderr = '', status = '0\n' } = {}) {
+    const dir = path.join(base, name);
+    fs.mkdirSync(path.join(dir, 'receipts'), { recursive: true });
+    for (const receipt of receipts) {
+      const call = path.join(dir, 'receipts', `call-${++counter}`);
+      fs.mkdirSync(call);
+      fs.writeFileSync(path.join(call, 'input.json'), JSON.stringify({ session_id: 's', turn_id: 't', cwd: fx.repo,
+        hook_event_name: 'PreToolUse', tool_name: 'Bash', tool_input: { command: deny }, tool_use_id: 'u', ...receipt.input }));
+      fs.writeFileSync(path.join(call, 'exit'), `${receipt.exit}\n`);
+      fs.writeFileSync(path.join(call, 'stderr'), receipt.stderr ?? '');
+    }
+    fs.writeFileSync(path.join(dir, 'codex.stdout'), '');
+    fs.writeFileSync(path.join(dir, 'codex.stderr'), stderr);
+    if (status !== null) fs.writeFileSync(path.join(dir, 'codex.status'), status);
+    return dir;
+  }
+  const policy = 'agent-guard: pushing to main is owner-only; push your feature branch (git push -u origin <branch>) and open a PR\n';
+  const blocked = 'hook: PreToolUse\nhook: PreToolUse Blocked\n';
+  const revalidate = (dir, scenario = 'guard-block-main-push') => spawnSync(runner,
+    ['--revalidate', '--run-dir', dir, '--repo', fx.repo, '--scenario', scenario], { encoding: 'utf8', env: baseEnv });
+  const pass = revalidate(runDir('pass', { receipts: [{ exit: 2, stderr: policy }], stderr: blocked }));
+  assert.equal(pass.status, 0, output(pass));
+  assert.match(pass.stdout, /evidence PASS \(guard-block-main-push\)/);
+  for (const [name, dir, expected] of [
+    ['unavailable', runDir('unavailable', { receipts: [{ exit: 2, stderr: 'agent-guard unavailable: cannot resolve repository\n' }], stderr: blocked }), /not the main-push policy denial/],
+    ['none', runDir('none', { stderr: blocked }), /no hook receipt/],
+    ['duplicate', runDir('duplicate', { receipts: [{ exit: 2, stderr: policy }, { exit: 2, stderr: policy }], stderr: blocked }), /2 hook receipts/],
+    ['wrong-command', runDir('wrong-command-input', { receipts: [{ exit: 2, stderr: policy, input: { tool_input: { command: 'git push origin main' } } }], stderr: blocked }), /differs from the scenario command/],
+    ['wrong-cwd', runDir('wrong-cwd', { receipts: [{ exit: 2, stderr: policy, input: { cwd: fx.isolation } }], stderr: blocked }), /not the disposable repository/],
+    ['other-tool', runDir('other-tool', { receipts: [{ exit: 2, stderr: policy, input: { tool_name: 'apply_patch' } }], stderr: blocked }), /not Bash/],
+    ['allowed-instead', runDir('allowed-instead', { receipts: [{ exit: 0 }], stderr: 'hook: PreToolUse\nhook: PreToolUse Completed\n' }), /guard exit 0 is not a denial/],
+    ['narrative-only', runDir('narrative-only', { stderr: `${blocked}agent-guard: pushing to main is owner-only\n` }), /no hook receipt/],
+    ['no-hook-lines', runDir('no-hook-lines', { receipts: [{ exit: 2, stderr: policy }] }), /lacks the "hook: PreToolUse Blocked"/],
+    ['payload-ran', runDir('payload-ran', { receipts: [{ exit: 2, stderr: policy }], stderr: `${blocked}CODEX_SMOKE_DENY_PAYLOAD_EXECUTED\n` }), /deny payload marker appeared/],
+    ['codex-failed', runDir('codex-failed', { receipts: [{ exit: 2, stderr: policy }], stderr: blocked, status: '1\n' }), /Codex exited 1/],
+    ['no-status', runDir('no-status', { receipts: [{ exit: 2, stderr: policy }], stderr: blocked, status: null }), /exit status is missing/],
+    ['bad-exit', runDir('bad-exit', { receipts: [{ exit: 'two', stderr: policy }], stderr: blocked }), /exit code is malformed/],
+  ]) {
+    const r = revalidate(dir);
+    assert.equal(r.status, 1, `${name}: ${output(r)}`);
+    assert.match(r.stderr, expected, name);
+  }
+  const allowPass = revalidate(runDir('allow-pass', { receipts: [{ exit: 0, input: { tool_input: { command: allow } } }],
+    stderr: 'hook: PreToolUse\nhook: PreToolUse Completed\nexec\ngit status --short in /x\n succeeded:\nCODEX_SMOKE_ALLOW_EXECUTED\n' }), 'guard-allow-git-status');
+  assert.equal(allowPass.status, 0, output(allowPass));
+  const allowDenied = revalidate(runDir('allow-denied', { receipts: [{ exit: 2, stderr: policy, input: { tool_input: { command: allow } } }], stderr: blocked }), 'guard-allow-git-status');
+  assert.equal(allowDenied.status, 1, output(allowDenied));
+  assert.match(allowDenied.stderr, /guard exit 2 is not an allow/);
+  const allowNoMarker = revalidate(runDir('allow-no-marker', { receipts: [{ exit: 0, input: { tool_input: { command: allow } } }],
+    stderr: 'hook: PreToolUse\nhook: PreToolUse Completed\n' }), 'guard-allow-git-status');
+  assert.equal(allowNoMarker.status, 1, output(allowNoMarker));
+  assert.match(allowNoMarker.stderr, /lacks the allow marker/);
+  // Receipt entries must be regular single-link files; links and extras are refused.
+  const linked = runDir('linked', { receipts: [{ exit: 2, stderr: policy }], stderr: blocked });
+  const call = path.join(linked, 'receipts', fs.readdirSync(path.join(linked, 'receipts'))[0]);
+  fs.renameSync(path.join(call, 'stderr'), path.join(call, 'stderr.real'));
+  fs.symlinkSync(path.join(call, 'stderr.real'), path.join(call, 'stderr'));
+  const linkedResult = revalidate(linked);
+  assert.equal(linkedResult.status, 1, output(linkedResult));
+  assert.match(linkedResult.stderr, /exactly exit, input.json and stderr/);
+  for (const [bad, expected] of [
+    [['--revalidate', '--repo', fx.repo, '--scenario', 'guard-block-main-push'], /requires --run-dir/],
+    [['--revalidate', '--run-dir', path.join(base, 'pass'), '--repo', fx.repo, '--scenario', 'other'], /not allowlisted/],
+    [['--revalidate', '--run-dir', 'relative', '--repo', fx.repo, '--scenario', 'guard-block-main-push'], /absolute/],
+    [[...fx.args, '--run-dir', path.join(base, 'pass')], /only accepted with --revalidate/],
+  ]) {
+    const r = spawnSync(runner, bad, { encoding: 'utf8', env: baseEnv });
+    assert.equal(r.status, 2, output(r));
+    assert.match(r.stderr, expected);
   }
 });
 
@@ -300,7 +469,7 @@ test('native approval still refuses script and mise-style shims without executin
 
 test('only API-key-only isolated auth is accepted after separate native/model declarations', () => {
   for (const [name, auth, expected] of [
-    ['api-key', { OPENAI_API_KEY: 'harmless-fixture-not-a-real-key' }, 0],
+    ['api-key', { OPENAI_API_KEY: 'harmless-fixture-not-a-real-key' }, 1],
     ['chatgpt', { OPENAI_API_KEY: null, tokens: { access_token: 'fixture' } }, 2],
     ['mixed', { OPENAI_API_KEY: 'fixture', tokens: {} }, 2],
     ['extra', { OPENAI_API_KEY: 'fixture', profile: 'default' }, 2],
@@ -311,6 +480,7 @@ test('only API-key-only isolated auth is accepted after separate native/model de
     fs.writeFileSync(file, JSON.stringify(auth), { mode: 0o600 });
     const r = run(fx, native.args, native.env);
     assert.equal(r.status, expected, `${name}: ${output(r)}`);
+    if (expected === 1) assert.match(r.stderr, /no hook receipt/, 'a harmless ELF stand-in yields no evidence, never a PASS');
     assert.equal(fs.readFileSync(file, 'utf8'), JSON.stringify(auth));
     assert.doesNotMatch(output(r), /harmless-fixture-not-a-real-key|access_token/);
   }
@@ -560,7 +730,12 @@ test('native mode requires separate declarations for activation and a possible m
     CODEX_SMOKE_NATIVE_APPROVED: '1',
     CODEX_SMOKE_MODEL_CALL_APPROVED: '1',
   });
-  assert.equal(r.status, 0, output(r));
+  // Declarations accepted and the harmless ELF ran, but with no receipt the runner
+  // reports an evidence failure rather than exit 0.
+  assert.equal(r.status, 1, output(r));
+  assert.match(r.stderr, /Codex exited 0; run directory/);
+  assert.match(r.stderr, /no hook receipt/);
+  assert.equal(fs.existsSync(path.join(fx.codexHome, 'config.toml')), true);
 });
 
 test('runner refuses non-allowlisted Codex sandbox and hook-trust arguments', () => {

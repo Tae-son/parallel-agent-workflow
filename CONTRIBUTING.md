@@ -103,8 +103,10 @@ registration and guard script bytes. Other hooks, profiles, config and host-mana
 state are refused. See `docs/agent-support.md` for the v0.165 contract, exact fixture layout,
 and native evidence requirements. Execute the runner directly so its privileged Bash startup
 ignores caller shell initialization. It invokes only an ephemeral, read-only `exec`
-with closed stdin. Its `--owner-approved` declaration is procedural evidence, not
-authenticated consent, so the owner's written approval remains the authority.
+with closed stdin, captures Codex's output under a per-run directory, and exits 0 only
+when the hook receipts written by the pinned fixture registration prove exactly the
+scenario command and verdict. Its `--owner-approved` declaration is procedural evidence,
+not authenticated consent, so the owner's written approval remains the authority.
 
 This exception does not authorise merging, pushing to `main`, force-pushing, running
 `scripts/land.sh` or `scripts/codex-review.sh`, changing normal profiles or live T3 settings,

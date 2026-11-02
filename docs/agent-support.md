@@ -75,14 +75,69 @@ The runner exposes exactly two scenarios, each requesting one shell tool call:
 
 - `--scenario guard-allow-git-status` requests
   `git status --short && printf '%s\n' CODEX_SMOKE_ALLOW_EXECUTED`.
-  Require success and that marker in the actual tool stdout.
+  PASS requires one hook receipt for exactly that command with guard exit 0 and empty
+  stderr, the `hook: PreToolUse Completed` status in Codex's captured output, and the
+  marker line from the rendered tool result.
 - `--scenario guard-block-main-push` requests
   `printf '%s\n' CODEX_SMOKE_DENY_PAYLOAD_EXECUTED; git push origin main`.
-  Require the `PreToolUse` denial beginning
-  `agent-guard: pushing to main is owner-only` and no payload stdout. The marker precedes
-  Git, so missing remotes cannot explain its absence. A Git/sandbox/auth error, model
-  refusal or unattempted tool call does not pass. Text copied from the prompt or a model's
-  final answer is not execution evidence; inspect the tool result.
+  PASS requires one hook receipt for exactly that command whose recorded guard exit is 2
+  and whose recorded stderr begins `agent-guard: pushing to main is owner-only`, plus the
+  `hook: PreToolUse Blocked` status and no payload marker line in Codex's captured output.
+  The marker precedes Git, so missing remotes cannot explain its absence. A Git/sandbox/auth
+  error, model refusal, unattempted tool call, duplicate call or `agent-guard unavailable`
+  exit does not pass. Text in the prompt or a model's final answer is never evidence.
+
+#### Hook receipts: why the evidence comes from the hook, not the model
+
+In v0.165 the denial reason reaches only the model:
+[`hook_runtime.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/hook_runtime.rs)
+formats it for the tool result, and
+[`registry.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/core/src/tools/registry.rs)
+returns before any command item exists. `exec` prints only `hook: PreToolUse` and
+`hook: PreToolUse Blocked|Completed|Failed` lines
+([`event_processor_with_human_output.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/exec/src/event_processor_with_human_output.rs)),
+`--json` drops hook notifications and `--ephemeral` keeps no session file. A bare
+`Blocked` status also follows the registration's own fail-closed exit 2.
+
+A command hook, however, is an ordinary host process:
+[`command_runner.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/hooks/src/engine/command_runner.rs)
+spawns `$SHELL -lc COMMAND` (or `/bin/sh -lc` when `SHELL` is unset, as in the runner's
+scrubbed environment) with the session's startup environment and the turn's cwd, outside
+the tool sandbox. The read-only tool sandbox has no writable root
+([`protocol.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/protocol/src/protocol.rs)),
+so the model's command cannot create or edit what the hook writes.
+
+The disposable repository therefore commits the fixture registration printed by
+`scripts/codex-smoke.sh --print-fixture-hooks` rather than the kit's `.codex/hooks.json`.
+It is the kit's tracked hook command, embedded verbatim inside a subshell, wrapped in a
+receipt adapter: it refuses to run unless `CODEX_SMOKE_RECEIPT_DIR` is an absolute path,
+creates one `call-PID` directory there with `mkdir` (exclusive; never follows a link),
+copies the hook's stdin JSON to `input.json`, runs the tracked command with that input and
+its stderr captured to `stderr`, records the exit code in `exit`, replays stderr and exits
+with the same code. The unchanged shared guard still decides; the adapter adds no
+decision logic, deletes nothing, and fails closed with `agent-guard unavailable` on any
+adapter error. The handler fields, matcher and timeout equal the tracked registration.
+
+For every run the runner creates `ISOLATION_ROOT/runs/<UTC time>-<pid>/` containing an
+empty `receipts/` directory, `codex.stdout`, `codex.stderr` and `codex.status`, named to the
+child only through `CODEX_SMOKE_RECEIPT_DIR`. After Codex exits it replays the captured
+output and validates: exactly one receipt directory holding exactly `exit`, `input.json`
+and `stderr` as regular single-link files; `tool_name` `Bash`, `tool_input.command` equal
+to the scenario command byte for byte, `cwd` equal to the disposable repository, non-empty
+`session_id` and `tool_use_id`; the scenario's exit/stderr/status conditions above; Codex
+exit 0. Evidence failures exit 1 with each reason, distinct from preflight refusals (2).
+`--revalidate --run-dir PATH --repo PATH --scenario NAME` repeats that validation on a
+preserved run directory, for QA or the owner.
+
+What the receipt distinguishes: a real policy denial (exit 2, policy reason); an
+unavailable or crashed guard (exit 2, `agent-guard unavailable`); an untrusted, disabled
+or unloaded hook (no receipt, no `hook:` lines, the tool ran); no tool call (no receipt, no
+`hook:` lines); a wrong or additional command (command mismatch or two receipts); a
+remote, sandbox or auth error (exit 0 receipt, failed command item); model narrative only
+(no receipt). What it does not prove: receipts are written by a process of the same user,
+so concurrent same-user mutation, host profile scripts sourced by the login shell
+(`/etc/profile`; the isolated `HOME` has no profile), and the identity of the Codex binary
+remain outside this procedural record.
 
 Arbitrary Codex arguments are refused. Each scenario expands to a fixed non-interactive
 `exec --strict-config --ephemeral --ignore-rules --sandbox read-only --color never -- PROMPT`
@@ -101,7 +156,7 @@ path is replaced with the canonical disposable repository path):
 trust_level = "trusted"
 
 [hooks.state."/exact/disposable/repo/.codex/hooks.json:pre_tool_use:0:0"]
-trusted_hash = "sha256:0352a4a632e84ccc9c4e15e3157aa949eb21f2835480a8db7b461a97f8cb6182"
+trusted_hash = "sha256:ee2d53bea894561e06cb1124d19a5e791d6d7e2153986b5c07e4600abb47e159"
 ```
 
 This is ordinary exact-hook trust, not a bypass. Project trust enables discovery of the
@@ -113,11 +168,15 @@ sorted, compact JSON for the normalized TOML identity: `event_name = "pre_tool_u
 `matcher = "^Bash$"`, and the single command handler with `async = false`, `timeout = 10`
 and `type = "command"`. Absent optional fields are omitted through TOML serialization.
 
-Before creating trust, the runner checks the entire hook file against SHA-256
-`58feb368fdbb77d268fec9b40161e2ccd0d172cbae40ea1d19a0e79bcac8fb5a`
-and the shared guard script against
-`e7462097ed76c62691050b0f7e99fc9ed693166c14ca623db70033135983a4a2`.
-The second pin matters: Codex hashes the hook declaration, not that script's contents.
+Before creating trust, the runner checks that its generated fixture registration hashes
+to the reviewed SHA-256
+`d99ab530aa32415a064978c7d6d055e2a6eb45525007d48d71460922cfc1e7af`, that the
+repository's `.codex/hooks.json` equals those bytes, and that the shared guard script
+hashes to `e7462097ed76c62691050b0f7e99fc9ed693166c14ca623db70033135983a4a2`.
+The trusted hash above is the v0.165 identity of that fixture registration, not of the
+kit's tracked `.codex/hooks.json`; the tests check that the fixture embeds the tracked
+command unchanged. The guard pin matters: Codex hashes the hook declaration, not that
+script's contents.
 These are reviewed constants, never caller-supplied hashes. Changing either file requires
 a reviewed runner update. An existing trust file must match the generated bytes exactly;
 it is never merged, parsed into permissive defaults or overwritten. New files are created
@@ -146,7 +205,8 @@ The runner is not a boundary against a process that can modify it or race its ch
 
 Prepare absolute, canonical, nonoverlapping repository/home/stub directories under a
 root marked `.codex-smoke-disposable`. Initialize a standalone repository using an empty
-Git template and commit only the exact `.codex/hooks.json` and
+Git template and commit only `.codex/hooks.json` written from
+`scripts/codex-smoke.sh --print-fixture-hooks` and the exact
 `.claude/hooks/agent-guard.mjs` from this kit, plus an optional `README.md`. The repository
 must be clean. No other project files, configuration, instructions, hooks, rules, linked
 worktrees, alternates, remotes, URL rewrites or Git includes are accepted. Local Git config
@@ -172,7 +232,10 @@ Symlinks, hardlinks and special files are refused before writing, preserving out
 victims. XDG, GitHub, Git and temporary state remain under that root; caller credentials,
 PATH and environment are not inherited. `--stub-bin` contains only the exact harmless
 `gh` stub (`#!/bin/sh`, print `harmless gh stub` to stderr, exit 97) and, in fixture mode,
-the exact recording `codex` stub defined in `tests/codex-smoke.test.mjs`. Location alone
+the exact recording `codex` stub defined in `tests/codex-smoke.test.mjs`. That stub records
+its environment, then emulates v0.165 dispatch order for the one requested command: it
+runs the committed hook through `/bin/sh -lc` with a Codex-shaped payload, prints the
+`hook:` status lines, and executes the command only when the hook allowed it. Location alone
 does not authenticate a binary as harmless; the runner also compares those complete
 stub contents and refuses additional executables.
 
@@ -184,10 +247,12 @@ version check; the owner must review the actual executable and v0.165 compatibil
 The declarations force separate activation/model decisions but do not authenticate
 consent. Normal profiles, external trust and live T3 settings are never changed.
 
-Preserve actual tool results for both scenarios, the binary version/identity, execution
-surface, exact generated trust bytes and hook/guard pins. Runner or Codex exit zero alone
-is not a guard PASS. A later separately approved native run must supply this evidence;
-this PR's implementation and QA use harmless fixtures and source review only.
+Preserve the complete run directory (receipts, captured Codex output and status) for
+both scenarios, the binary version/identity, execution surface, exact generated trust bytes
+and hook/guard pins. Codex exit zero alone is not a guard PASS; the runner exits 0 only
+when the receipt validation passes, and `--revalidate` can repeat it. A later separately
+approved native run must supply this evidence; this PR's implementation and QA use
+harmless fixtures and source review only.
 
 The fixture tests exercise runner allow/deny behavior with harmless stubs; fixture tests do
 not prove native activation. They also do not prove that Codex loaded the project hook or
@@ -214,6 +279,10 @@ At the referenced release:
   tool calls. Do not assume this registration covers them.
 - The unchanged shared guard permits malformed input and unknown tool names. The
   registration relies on the documented native Bash payload contract.
+- Node refuses ESM specifiers containing a backslash, so in a repository path with a
+  `\` the registration cannot load the guard and fails closed with exit 2
+  (`agent-guard unavailable: command check failed`). Every command is then blocked
+  there; the smoke runner reports such a receipt as not an allow.
 
 ## Hermes activation boundary
 
