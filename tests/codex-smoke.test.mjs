@@ -19,6 +19,15 @@ const baseEnv = {
   GIT_COMMITTER_EMAIL: 'test@example.invalid',
 };
 
+// Without an executable node in /usr/bin:/bin the runner appends the directory of the
+// checked caller PATH node to the child PATH; direct hook runs here mirror that.
+const nodeReal = fs.realpathSync(process.execPath);
+const nodeDir = path.dirname(nodeReal);
+const systemNode = ['/usr/bin/node', '/bin/node'].some((file) => {
+  try { fs.accessSync(file, fs.constants.X_OK); return fs.statSync(file).isFile(); } catch { return false; }
+});
+const childNodePath = systemNode ? '' : `:${nodeDir}`;
+
 let tmp;
 before(() => { tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-smoke-test-')); });
 after(() => fs.rmSync(tmp, { recursive: true, force: true }));
@@ -291,7 +300,7 @@ test('fixed scenario commands exercise the exact pinned hook with distinct allow
     const direct = path.join(fx.isolation, `direct-${scenario}`);
     fs.mkdirSync(direct);
     const env = { HOME: fx.home, CODEX_HOME: fx.codexHome, CODEX_SMOKE_RECEIPT_DIR: direct,
-      PATH: `${fx.stubBin}:/usr/bin:/bin`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
+      PATH: `${fx.stubBin}:/usr/bin:/bin${childNodePath}`, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' };
     const decision = spawnSync('/bin/sh', ['-lc', hook.command], { cwd: fx.repo, env, encoding: 'utf8',
       input: JSON.stringify({ session_id: 's', tool_name: 'Bash', tool_input: { command }, cwd: fx.repo, tool_use_id: 't' }) });
     assert.equal(decision.stdout, '');
@@ -465,6 +474,108 @@ test('native approval still refuses script and mise-style shims without executin
   assert.equal(r.status, 2, output(r));
   assert.match(output(r), /ELF binary.*mise shim/);
   assert.equal(fs.readFileSync(victim, 'utf8'), 'unchanged\n');
+});
+
+test('native mode refuses symlinked executables and mise or shims paths without executing them', () => {
+  // Harmless /usr/bin/true copies only; mise, Codex and real shims are never executed.
+  for (const [name, place] of [
+    ['symlink', (base, real) => { fs.symlinkSync(real, path.join(base, 'codex')); return path.join(base, 'codex'); }],
+    ['symlinked-dir', (base, real) => {
+      fs.mkdirSync(path.join(base, 'real-dir'));
+      fs.copyFileSync(real, path.join(base, 'real-dir/codex'));
+      fs.symlinkSync(path.join(base, 'real-dir'), path.join(base, 'link-dir'));
+      return path.join(base, 'link-dir/codex');
+    }],
+    ['mise-shims-dir', (base, real) => {
+      fs.mkdirSync(path.join(base, 'mise/shims'), { recursive: true });
+      fs.copyFileSync(real, path.join(base, 'mise/shims/codex'));
+      return path.join(base, 'mise/shims/codex');
+    }],
+    ['mise-basename', (base, real) => { fs.copyFileSync(real, path.join(base, 'mise')); return path.join(base, 'mise'); }],
+  ]) {
+    const fx = fixture(`native-link-${name}`);
+    const native = nativeFixture(fx);
+    const base = path.join(tmp, `native-link-${name}-bin`);
+    fs.mkdirSync(base);
+    const target = place(base, native.outside);
+    fs.chmodSync(target, 0o755);
+    const args = [...native.args];
+    args[args.indexOf(native.outside)] = target;
+    const r = run(fx, args, native.env);
+    assert.equal(r.status, 2, `${name}: ${output(r)}`);
+    assert.match(output(r), /symlinked Codex executables and mise shims are refused|mise or shims directories are refused/, name);
+    assert.match(output(r), /canonical real/, name);
+    assert.equal(fs.existsSync(path.join(fx.codexHome, 'config.toml')), false, name);
+    assert.deepEqual(runDirs(fx), [], `${name}: the target must not be launched`);
+  }
+});
+
+// Hosts like GitHub Actions have no node in /usr/bin:/bin. Where /usr/bin/node exists,
+// a private user and mount namespace hides it (the host is unchanged) to exercise the
+// caller-PATH fallback; the test skips when neither is possible.
+const hideSystemNode = '[ -e /usr/bin/node ] && { mount --bind /dev/null /usr/bin/node || exit 125; }; '
+  + 'if [ -e /bin/node ] && [ ! /bin/node -ef /usr/bin/node ]; then mount --bind /dev/null /bin/node || exit 125; fi; '
+  + 'for f in /usr/bin/node /bin/node; do [ -f "$f" ] && [ -x "$f" ] && exit 125; done; exec "$@"';
+function fallbackSkip() {
+  if (path.basename(nodeReal) !== 'node' || ['/usr/bin', '/bin'].includes(nodeDir)) return 'test node is the system node';
+  if (!systemNode) return false;
+  return spawnSync('unshare', ['-rm', '/bin/sh', '-c', hideSystemNode, 'sh', '/bin/true']).status === 0
+    ? false : 'cannot hide the system node in a private namespace';
+}
+function runWithoutSystemNode(fx, args, callerPath, cwd = root) {
+  const env = { ...baseEnv, OPENAI_API_KEY: 'must-not-leak', PATH: callerPath };
+  const r = systemNode
+    ? spawnSync('unshare', ['-rm', '/bin/sh', '-c', hideSystemNode, 'sh', runner, ...args], { cwd, env, encoding: 'utf8' })
+    : spawnSync(runner, args, { cwd, env, encoding: 'utf8' });
+  assert.notEqual(r.status, 125, output(r));
+  return r;
+}
+
+test('without system node the runner uses one checked caller PATH node and records it', { skip: fallbackSkip() }, () => {
+  const fx = fixture('node-fallback');
+  const relative = path.join(tmp, 'node-fallback-cwd');
+  const victim = path.join(tmp, 'node-fallback-victim');
+  fs.mkdirSync(path.join(relative, 'relbin'), { recursive: true });
+  fs.writeFileSync(victim, 'unchanged\n');
+  executable(path.join(relative, 'relbin/node'), `#!/bin/sh\nprintf compromised > ${shQuote(victim)}\n`);
+  const r = runWithoutSystemNode(fx, fx.args, `relbin:${nodeDir}:/usr/bin:/bin`, relative);
+  assert.equal(r.status, 0, output(r));
+  assert.ok(r.stderr.includes(`codex-smoke: node ${nodeReal} (caller PATH entry ${nodeDir})\n`), r.stderr);
+  assert.equal(fs.readFileSync(victim, 'utf8'), 'unchanged\n', 'relative PATH entries are skipped');
+  assert.match(fs.readFileSync(fx.record, 'utf8'), new RegExp(`^path=${`${fx.stubBin}:/usr/bin:/bin:${nodeDir}`.replaceAll('\\', '\\\\')}$`, 'm'));
+});
+
+test('without system node a shim, script or in-root caller PATH node is refused before running', { skip: fallbackSkip() }, () => {
+  for (const [name, reason, place] of [
+    ['script', /ELF binary, not a script shim/, (dir, victim) => executable(path.join(dir, 'node'), `#!/bin/sh\nprintf compromised > ${shQuote(victim)}\n`)],
+    ['symlink-shim', /resolve to a regular file named node, not a shim/, (dir) => {
+      fs.copyFileSync('/usr/bin/true', path.join(dir, 'mise'));
+      fs.chmodSync(path.join(dir, 'mise'), 0o755);
+      fs.mkdirSync(path.join(dir, 'shims'));
+      fs.symlinkSync(path.join(dir, 'mise'), path.join(dir, 'shims/node'));
+      return path.join(dir, 'shims');
+    }],
+    ['in-root', /node must not resolve inside the isolation root/, (dir, victim, fx) => {
+      const inRoot = path.join(fx.isolation, 'node-bin');
+      fs.mkdirSync(inRoot);
+      fs.copyFileSync('/usr/bin/true', path.join(inRoot, 'node'));
+      fs.chmodSync(path.join(inRoot, 'node'), 0o755);
+      return inRoot;
+    }],
+  ]) {
+    const fx = fixture(`node-refused-${name}`);
+    const dir = path.join(tmp, `node-refused-${name}-bin`);
+    const victim = path.join(tmp, `node-refused-${name}-victim`);
+    fs.mkdirSync(dir);
+    fs.writeFileSync(victim, 'unchanged\n');
+    const entry = place(dir, victim, fx) ?? dir;
+    const r = runWithoutSystemNode(fx, fx.args, `${entry}:${nodeDir}:/usr/bin:/bin`);
+    assert.equal(r.status, 2, `${name}: ${output(r)}`);
+    assert.match(output(r), reason, name);
+    assert.equal(fs.readFileSync(victim, 'utf8'), 'unchanged\n', name);
+    assert.equal(fs.existsSync(path.join(fx.codexHome, 'config.toml')), false, name);
+    assert.equal(fs.existsSync(fx.record), false, name);
+  }
 });
 
 test('only API-key-only isolated auth is accepted after separate native/model declarations', () => {

@@ -197,7 +197,19 @@ mechanism; it does not establish native activation on a particular binary or hos
 
 #### Required isolation and activation evidence
 
-Use Linux with `/bin/bash`, `/usr/bin/node` and system Git. Execute the script directly
+Use Linux with `/bin/bash`, Node and system Git. The runner resolves node once, without
+executing a candidate, and passes that exact path to each of its scrubbed `env -i` Node
+processes. It uses an executable `node` in its fixed `/usr/bin:/bin` first. Otherwise
+(for example on GitHub Actions, where `actions/setup-node` installs node elsewhere) it
+takes the first absolute caller `PATH` entry containing `node`, skipping relative entries.
+That candidate's realpath must be a regular ELF file named `node` outside the isolation
+root, so script shims and symlink shims such as mise's (which resolve to the `mise`
+binary) are refused, and a refused first candidate fails closed. Run output records the
+chosen path and its source as `codex-smoke: node PATH (SOURCE)`. Only in the fallback
+case is that node's directory appended after `STUB:/usr/bin:/bin` in the child `PATH`,
+so the hook and recording stub can run bare `node`. It cannot shadow the stubs, Git or
+system tools, though other executables in that directory become reachable by name. The
+caller `PATH` itself is never passed on. Execute the script directly
 (or with `/bin/bash -p`); its privileged Bash startup ignores `BASH_ENV`, exported
 functions and inherited shell options before the script is read. Plain `bash script`
 is refused; its interpreter could already have run caller startup code before refusal.
@@ -239,11 +251,16 @@ runs the committed hook through `/bin/sh -lc` with a Codex-shaped payload, print
 does not authenticate a binary as harmless; the runner also compares those complete
 stub contents and refuses additional executables.
 
-Native mode requires a reviewed resolved ELF executable outside the root, plus
+Native mode requires a reviewed ELF executable outside the root, plus
 `--native`, `--model-call-approved`, `CODEX_SMOKE_NATIVE_APPROVED=1` and
-`CODEX_SMOKE_MODEL_CALL_APPROVED=1`. Script wrappers, including mise shims that could
-install a missing runtime, are refused. ELF format is not binary authentication or a
-version check; the owner must review the actual executable and v0.165 compatibility.
+`CODEX_SMOKE_MODEL_CALL_APPROVED=1`. `--codex-bin` must be the canonical real binary path:
+its realpath must equal the given path, so a symlinked executable or a path through a
+symlinked directory is refused. A binary named `mise` or under a directory named `mise` or
+`shims` is refused, and script wrappers fail the ELF check. Mise shims, whether a symlink
+to the `mise` ELF or a script, could install a missing runtime and are refused; the owner
+must pass the canonical real Codex binary path. These are path checks, and ELF format
+is not binary authentication or a version check; the owner must review the actual
+executable and v0.165 compatibility.
 The declarations force separate activation/model decisions but do not authenticate
 consent. Normal profiles, external trust and live T3 settings are never changed.
 

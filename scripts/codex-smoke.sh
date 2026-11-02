@@ -6,6 +6,8 @@ if [[ $- != *p* ]]; then
   builtin exit 2
 fi
 set -euo pipefail
+# Kept only for the fallback node lookup below; never passed to child processes.
+caller_path=${PATH-}
 PATH=/usr/bin:/bin
 export PATH
 
@@ -42,6 +44,36 @@ die() {
 need_value() {
   [ "$#" -ge 2 ] || die "$1 requires a value"
 }
+
+# Node is resolved once, without executing any candidate, and every runner Node
+# process uses that exact path. The fixed PATH comes first. Hosts such as GitHub
+# Actions install node elsewhere, so the fallback is the first absolute caller PATH
+# entry holding node: its realpath must be a regular ELF file named node (a mise or
+# other shim symlink resolves to a differently named binary, a script shim is not
+# ELF). Relative entries are skipped; a refused first candidate fails closed.
+node_extra_path=
+# command -v alone can return a non-executable match, so require an executable file.
+if real_node=$(command -v node) && [ -f "$real_node" ] && [ -x "$real_node" ]; then
+  real_node=$(realpath -e -- "$real_node") || die 'cannot resolve node executable'
+  node_source='fixed PATH /usr/bin:/bin'
+else
+  real_node=
+  IFS=: read -r -a caller_path_entries <<< "$caller_path"
+  for node_dir in "${caller_path_entries[@]}"; do
+    [[ "$node_dir" == /* ]] || continue
+    [ -f "$node_dir/node" ] && [ -x "$node_dir/node" ] || continue
+    real_node=$(realpath -e -- "$node_dir/node") || die "cannot resolve caller PATH node: $node_dir/node"
+    break
+  done
+  [ -n "$real_node" ] || die 'node is required in /usr/bin:/bin or in an absolute caller PATH entry'
+  [ -f "$real_node" ] && [ "${real_node##*/}" = node ] \
+    || die "caller PATH node must resolve to a regular file named node, not a shim: $node_dir/node -> $real_node"
+  [ "$(od -An -N4 -tx1 -- "$real_node" | tr -d ' \n')" = 7f454c46 ] \
+    || die "caller PATH node must be an ELF binary, not a script shim: $real_node"
+  node_extra_path=${real_node%/*}
+  [[ "$node_extra_path" != *[:$'\001'-$'\037'$'\177']* ]] || die "caller PATH node directory is not usable in PATH: $node_extra_path"
+  node_source="caller PATH entry $node_dir"
+fi
 
 caller_home=${HOME:-}
 caller_codex_home=${CODEX_HOME:-${HOME:+$HOME/.codex}}
@@ -86,7 +118,7 @@ done
 # adapter can record evidence that the read-only tool sandbox cannot forge. Codex
 # hashes only this declaration; the guard script bytes are pinned separately below.
 fixture_hooks() {
-  env -i PATH=/usr/bin:/bin /usr/bin/node - <<'NODE'
+  env -i PATH=/usr/bin:/bin "$real_node" - <<'NODE'
 const tracked = "root=$(git rev-parse --show-toplevel) || { printf '%s\\n' 'agent-guard unavailable: cannot resolve repository' >&2; exit 2; }; git -C \"$root\" branch --show-current >/dev/null || { printf '%s\\n' 'agent-guard unavailable: cannot inspect repository branch' >&2; exit 2; }; node \"$root/.claude/hooks/agent-guard.mjs\"; rc=$?; case $rc in 0|2) exit \"$rc\" ;; *) printf '%s\\n' 'agent-guard unavailable: command check failed' >&2; exit 2 ;; esac";
 const prefix = `case "\${CODEX_SMOKE_RECEIPT_DIR:-}" in /*) ;; *) printf '%s\\n' 'agent-guard unavailable: smoke receipt directory is not configured' >&2; exit 2 ;; esac; receipt="$CODEX_SMOKE_RECEIPT_DIR/call-$$"; mkdir "$receipt" || { printf '%s\\n' 'agent-guard unavailable: cannot create smoke receipt' >&2; exit 2; }; cat > "$receipt/input.json" || { printf '%s\\n' 'agent-guard unavailable: cannot record smoke input' >&2; exit 2; }; ( `;
 const suffix = ` ) < "$receipt/input.json" 2> "$receipt/stderr"; rc=$?; printf '%s\\n' "$rc" > "$receipt/exit"; cat "$receipt/stderr" >&2; exit "$rc"`;
@@ -96,10 +128,13 @@ const hooks = { hooks: { PreToolUse: [{ matcher: '^Bash$', hooks: [
 process.stdout.write(`${JSON.stringify(hooks, null, 2)}\n`);
 NODE
 }
-fixture_hooks_json=$(fixture_hooks; printf x) || die 'cannot generate the fixture hook registration'
-fixture_hooks_json=${fixture_hooks_json%x}
+generate_fixture_hooks() {
+  fixture_hooks_json=$(fixture_hooks; printf x) || die 'cannot generate the fixture hook registration'
+  fixture_hooks_json=${fixture_hooks_json%x}
+}
 
 if [ "$print_fixture_hooks" -eq 1 ]; then
+  generate_fixture_hooks
   printf '%s' "$fixture_hooks_json"
   exit 0
 fi
@@ -125,7 +160,7 @@ Report the tool result, then stop. PASS requires the PreToolUse denial 'agent-gu
 # failures exit 1, distinct from preflight refusals (2). Receipts are written by the
 # hook process of the same user, so this is a procedural record, not authentication.
 validate_run() {
-  env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/node - "$1" "$2" "$3" "$4" <<'NODE'
+  env -i PATH=/usr/bin:/bin LC_ALL=C "$real_node" - "$1" "$2" "$3" "$4" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
 const [runDir, repo, scenario, expectedCommand] = process.argv.slice(2);
@@ -241,9 +276,15 @@ canonical_dir() {
   [ "$resolved" = "$1" ] || die "boundary paths must be canonical, without symlinks or aliases: $1"
   printf '%s\n' "$resolved"
 }
-canonical_file() {
+# Like canonical_dir: realpath would otherwise follow a symlink-style shim (such as
+# a mise shim linking to the mise ELF) and only the target would be checked.
+canonical_codex_bin() {
   [ -f "$1" ] || die "required file does not exist: $1"
-  realpath -e -- "$1" || die "cannot resolve file: $1"
+  local resolved
+  resolved=$(realpath -e -- "$1") || die "cannot resolve file: $1"
+  [ "$resolved" = "$1" ] \
+    || die "symlinked Codex executables and mise shims are refused; pass the canonical real binary path: $1"
+  printf '%s\n' "$resolved"
 }
 inside() {
   [[ "$1" == "$2"/* ]]
@@ -254,7 +295,7 @@ repo=$(canonical_dir "$repo")
 isolated_home=$(canonical_dir "$isolated_home")
 codex_home=$(canonical_dir "$codex_home")
 stub_bin=$(canonical_dir "$stub_bin")
-codex_bin=$(canonical_file "$codex_bin")
+codex_bin=$(canonical_codex_bin "$codex_bin")
 
 marker="$isolation_root/.codex-smoke-disposable"
 [ -f "$marker" ] && [ ! -L "$marker" ] || die "isolation root lacks a regular .codex-smoke-disposable marker"
@@ -264,6 +305,8 @@ for pair in "repo:$repo" "home:$isolated_home" "CODEX_HOME:$codex_home" "stub bi
   inside "$value" "$isolation_root" || die "$label must be inside the isolation root"
 done
 [ "$isolated_home" != "$codex_home" ] || die 'HOME and CODEX_HOME must be separate isolated directories'
+! inside "$real_node" "$isolation_root" || die "node must not resolve inside the isolation root: $real_node"
+generate_fixture_hooks
 
 boundaries=("$repo" "$isolated_home" "$codex_home" "$stub_bin")
 for ((first_idx=0; first_idx<${#boundaries[@]}; first_idx++)); do
@@ -295,6 +338,10 @@ else
     || die 'a Codex binary outside the isolation root requires native activation approval and separate model-call approval'
   [ "${CODEX_SMOKE_NATIVE_APPROVED:-}" = 1 ] && [ "${CODEX_SMOKE_MODEL_CALL_APPROVED:-}" = 1 ] \
     || die 'native execution requires separate owner approval declarations: CODEX_SMOKE_NATIVE_APPROVED=1 and CODEX_SMOKE_MODEL_CALL_APPROVED=1'
+  case "$codex_bin" in
+    */mise|*/mise/*|*/shims/*)
+      die "mise executables and binaries under mise or shims directories are refused; pass the canonical real Codex binary path: $codex_bin" ;;
+  esac
 fi
 
 for live in "$caller_home" "$caller_codex_home"; do
@@ -308,7 +355,7 @@ done
 # Validate before ANY repository-aware Git command or write. This Node process
 # gets no caller preloads, credentials, shell variables or module search paths.
 # Linux only: /etc/codex can supply managed hooks even when user state is isolated.
-env -i PATH=/usr/bin:/bin LC_ALL=C /usr/bin/node - \
+env -i PATH=/usr/bin:/bin LC_ALL=C "$real_node" - \
   "$isolation_root" "$repo" "$isolated_home" "$codex_home" "$stub_bin" "$codex_bin" "$native" "$real_git" "$fixture_hooks_json" <<'NODE'
 const fs = require('node:fs');
 const path = require('node:path');
@@ -441,7 +488,7 @@ STUB
     const fd = fs.openSync(codexBin, 'r');
     const magic = Buffer.alloc(4);
     try { fs.readSync(fd, magic, 0, 4, 0); } finally { fs.closeSync(fd); }
-    if (!magic.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) refuse('native executable must be a reviewed ELF binary, not a script, mise shim or installer');
+    if (!magic.equals(Buffer.from([0x7f, 0x45, 0x4c, 0x46]))) refuse('native executable must be a reviewed ELF binary, not a script wrapper, mise shim or installer');
   }
   // Do not create trust yet: shell preflight must also establish a clean Git tree.
 } catch (error) {
@@ -458,7 +505,7 @@ top=$(safe_git -C "$repo" rev-parse --show-toplevel 2>/dev/null) || die 'repo is
 # preexisting state; exact existing trust is verified rather than rewritten.
 trust_file="$codex_home/config.toml"
 if [ ! -e "$trust_file" ]; then
-  env -i PATH=/usr/bin:/bin /usr/bin/node - "$repo" "$trust_file" <<'NODE'
+  env -i PATH=/usr/bin:/bin "$real_node" - "$repo" "$trust_file" <<'NODE'
 const fs = require('node:fs');
 const [repo, file] = process.argv.slice(2);
 const trust = `[projects.${JSON.stringify(repo)}]\ntrust_level = "trusted"\n\n` +
@@ -511,7 +558,11 @@ codex_stderr="$run_dir/codex.stderr"
 codex_status_file="$run_dir/codex.status"
 (umask 077; set -o noclobber; : > "$codex_stdout" && : > "$codex_stderr") || die 'cannot create Codex output capture files'
 
-child_path="$stub_bin:/usr/bin:/bin"
+# A fallback node directory is appended last so the hook and recording stub can run
+# bare node; it cannot shadow the stubs, Git or system tools. The caller PATH itself
+# is never passed on.
+child_path="$stub_bin:/usr/bin:/bin${node_extra_path:+:$node_extra_path}"
+printf 'codex-smoke: node %s (%s)\n' "$real_node" "$node_source" >&2
 set +e
 (
   cd "$repo" || exit 2
