@@ -139,20 +139,23 @@ function checkSimple(words, ctx) {
   if (!words.length) return null;
   const [cmd, ...args] = words, b = base(cmd);
   if (b === 'cd') { ctx.cwd = resolveDir(ctx.cwd, args.find((a) => !a.startsWith('-')) ?? homedir()); return null; }
-  const script = scriptReason(cmd);
+  const script = scriptReason(cmd, args);
   if (script) return script;
   if (SHELLS.has(b)) return checkShell(args, ctx);
-  if (b === 'source' || b === '.') return args[0] ? scriptReason(args[0]) : null;
+  if (b === 'source' || b === '.') return args[0] ? scriptReason(args[0], args.slice(1)) : null;
   if (b === 'eval') return check(args.join(' '), ctx);
   if (b === 'git') return checkGit(args, ctx);
   if (b === 'gh') return checkGh(args);
   return null;
 }
 
-function scriptReason(p) {
+function scriptReason(p, args = []) {
   const b = base(p);
   if (b === 'land.sh') return `running land.sh blocked: ${OWNER_MERGE}`;
   if (b === 'codex' || b === 'codex-review.sh') return CODEX;
+  if (b === 'codex-smoke.sh' && !args.includes('--owner-approved')) {
+    return 'Codex smoke runner requires explicit owner approval and declared isolation boundaries; use scripts/codex-smoke.sh --owner-approved only after the owner approves this exact test';
+  }
   return null;
 }
 
@@ -170,7 +173,7 @@ function checkShell(args, ctx) {
     if (a !== '--' && /^[-+]/.test(a)) continue; // --norc, --login, ...
     if (a === '--') { if (++i >= args.length) return null; }
     if (syntaxOnly) return null;
-    return commandMode ? check(args[i], ctx) : scriptReason(args[i]);
+    return commandMode ? check(args[i], ctx) : scriptReason(args[i], args.slice(i + 1));
   }
   return null;
 }

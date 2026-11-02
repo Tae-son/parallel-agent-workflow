@@ -16,11 +16,25 @@ Hermes can read this file directly when it is not registered in its skill catalo
 **Always, at every step:**
 
 - The owner merges. Never merge, push to `main`, push with `--force` (only
-  `--force-with-lease`, on your own branch), or run `scripts/land.sh`,
-  `scripts/codex-review.sh` or `codex`.
+  `--force-with-lease`, on your own branch), or run `scripts/land.sh` or
+  `scripts/codex-review.sh`. Do not run `codex` directly.
 - Edit only the brief's Allowed paths, in your own worktree and branch.
 - Gate files (`scripts/gate-files.txt`) only when the brief says so.
 - When a stop condition below holds, stop and ask the owner instead of guessing.
+
+Agents may run Codex smoke tests only when the owner explicitly approves the exact test and
+its isolation boundaries. Use only `scripts/codex-smoke.sh`, which requires a marked
+disposable root, a clean repository without remotes, isolated `HOME`/`CODEX_HOME`, harmless
+command stubs and a scrubbed environment. It accepts only named allowlisted scenarios, never
+arbitrary Codex arguments or config. For the pinned guard fixture only, it creates or verifies
+one exact project/hook trust artifact in the disposable `CODEX_HOME`; all other trust and
+config is refused. Follow `docs/agent-support.md` for the required fixture layout and native
+evidence. Execute the runner directly to preserve its protected Bash startup.
+The runner declaration is not authenticated owner
+consent; retain the written approval. The exception never permits merging, pushing to
+`main`, force-pushing, owner-only review scripts, normal-profile or live-T3 changes, trust or
+sandbox bypasses, dependency installation, or paid model calls without separate approval.
+Fixture results do not prove native activation.
 
 ## 0. Resume (only if the task is already under way)
 
