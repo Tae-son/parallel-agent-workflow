@@ -14,6 +14,10 @@
   symlink, because `land.sh` refuses symlinks). `.agents/*` is now a gate file. `install.sh`
   notes when a kept copy leaves the two out of sync, and installs `tests/agent-skill.test.mjs`,
   which checks that they match.
+- `npm run verify` runs in well under a minute instead of about 2.5: `tests/install.test.mjs` no
+  longer uses a catastrophically backtracking regex, `tests/land.test.mjs` feeds typed answers to
+  util-linux `script` through a FIFO held open so its stdin never hits EOF (which made it wait 2 s
+  whenever the child exited with answers unread), and `lint` now also checks `scripts/codex-smoke.sh`.
 
 ## 0.1.0 (2026-10-28)
 
