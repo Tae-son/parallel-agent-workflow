@@ -414,3 +414,29 @@ test('indented gate pattern and indented comments parse like land.sh', () => {
   assert.deepEqual(chunkDirs(r.out), ['chunk-1']);
   assert.equal(read(r.out, 'chunk-1', 'files'), 'vercel.json\0');
 });
+
+test('a gate-files.txt pattern ending in "/" is a directory prefix, as in land.sh', () => {
+  const ctx = setup(baseFiles, { 'tests/x.test.mjs': 'export {};\n', 'README.md': 'readme v2\n' });
+  fs.writeFileSync(path.join(ctx.bin, 'gate-files.txt'), 'tests/\n');
+  const r = run(ctx, { answers: 'no\n' });
+  assert.equal(r.status, 2, r.text);
+  assert.deepEqual(chunkDirs(r.out), ['chunk-1']);
+  assert.equal(read(r.out, 'chunk-1', 'files'), 'tests/x.test.mjs\0');
+  assert.match(read(r.out, 'chunk-1', 'payload.md'), /tests\/x\.test\.mjs/);
+});
+
+test('a byte-order mark at the start of gate-files.txt does not disable its first pattern', () => {
+  const ctx = setup(baseFiles, { 'vercel.json': '{"v":2}\n' });
+  fs.writeFileSync(path.join(ctx.bin, 'gate-files.txt'), '﻿vercel.json\n');
+  const r = run(ctx, { answers: 'no\n' });
+  assert.equal(r.status, 2, r.text);
+  assert.equal(read(r.out, 'chunk-1', 'files'), 'vercel.json\0');
+});
+
+test('a risky-paths.txt pattern ending in "/" is a directory prefix, as in land.sh', () => {
+  const ctx = setup(baseFiles, { 'src/components/Foo.jsx': 'export const Foo = 2;\n' });
+  fs.writeFileSync(path.join(ctx.bin, 'risky-paths.txt'), 'src/components/\n');
+  const r = run(ctx, { answers: 'no\n' });
+  assert.equal(r.status, 2, r.text);
+  assert.equal(read(r.out, 'chunk-1', 'files'), 'src/components/Foo.jsx\0');
+});

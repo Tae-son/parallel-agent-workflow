@@ -60,32 +60,36 @@ HEAD=$(git -C "$ROOT" rev-parse --verify --quiet "$HEAD^{commit}") || { say "cod
 
 # 1-2. Risky files (risky-paths.txt, the shared gate list, new storage/network calls), minus exclusions.
 [[ -f $GATEFILE ]] || { say "codex-review: $GATEFILE is missing; review did not run"; exit 2; }
-# Same parsing as land.sh: trim both ends, drop empty lines and lines starting with "#".
-read_patterns() { # file -> array name
-  local -n arr=$2
-  local l
-  arr=()
-  while IFS= read -r l || [ -n "$l" ]; do
-    l=$(LC_ALL=C sed -E 's/^[[:space:]]+|[[:space:]]+$//g' <<<"$l")
-    [[ -z $l || $l == \#* ]] || arr+=("$l")
-  done < <(LC_ALL=C tr -d '\000' <"$1")
+# Same parsing as land.sh read_patterns: a leading byte-order mark is dropped, "#" comment lines
+# are removed, both ends are trimmed and empty lines are dropped. NULs are stripped first (this
+# script's existing rule) and grep -a keeps an invalid byte from emptying the whole list.
+read_patterns() { # file -> prints trimmed, non-comment, non-empty lines
+  LC_ALL=C tr -d '\000' <"$1" | LC_ALL=C sed -e '1s/^\xef\xbb\xbf//' | LC_ALL=C grep -av '^[[:space:]]*#' \
+    | LC_ALL=C sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' | LC_ALL=C grep -av '^$' || true
 }
-read_patterns "$GATEFILE" GATES
+mapfile -t GATES < <(read_patterns "$GATEFILE")
 ((${#GATES[@]})) || { say "codex-review: $GATEFILE lists no patterns; review did not run"; exit 2; }
 RISKY_PATTERNS=()
-[[ -f $RISKYFILE ]] && read_patterns "$RISKYFILE" RISKY_PATTERNS
-is_gate() {
-  local p
-  for p in "${RISKY_PATTERNS[@]}" "${GATES[@]}"; do [[ $1 == $p ]] && return 0; done
+[[ -f $RISKYFILE ]] && mapfile -t RISKY_PATTERNS < <(read_patterns "$RISKYFILE")
+# Same matching as land.sh match_any: a pattern ending in "/" is a directory prefix (like Allowed
+# paths); anything else is a bash glob.
+match_any() { # path pattern...
+  local p=$1 g; shift
+  for g in "$@"; do
+    if [[ $g == */ ]]; then [[ $p == "$g"* ]] && return 0
+    else [[ $p == $g ]] && return 0; fi
+  done
   return 1
 }
+is_gate() { match_any "$1" "${RISKY_PATTERNS[@]}" "${GATES[@]}"; }
 touches_io() {
   gdiff -U0 "$BASE" "$HEAD" -- ":(literal)$1" | awk '/^@@/ { h = 1; next }
     h && /^\+/ && /localStorage|sessionStorage|indexedDB|document\.cookie|fetch\(|XMLHttpRequest|sendBeacon|WebSocket/ { f = 1 }
     END { exit !f }'
 }
+# codex-exclude.txt shares the line format but has its own matching rules (see its header).
 EXPATS=()
-[[ -f $EXCLUDE ]] && mapfile -t EXPATS < <(grep -vE '^[[:space:]]*(#|$)' "$EXCLUDE" | sed 's/[[:space:]]*$//')
+[[ -f $EXCLUDE ]] && mapfile -t EXPATS < <(read_patterns "$EXCLUDE")
 excluded() {
   local f=$1 p
   for p in "${EXPATS[@]}"; do
