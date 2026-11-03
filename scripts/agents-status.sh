@@ -45,18 +45,56 @@ print_list() { # label file
   if (( n )); then sed 's/^/    /' "$2"; fi
 }
 
+# PR state: one `gh pr list` for the whole repo, looked up per branch. If gh returns
+# exactly PR_LIMIT entries the page may be truncated, so branches absent from it fall
+# back to the old per-branch query. gh missing or failing gives "unknown" everywhere.
+PR_LIMIT=200
+declare -A pr_found=()
+pr_mode=unknown # unknown | listed | truncated
+gh_cmd=()       # gh with GH_PROMPT_DISABLED and an optional timeout, run from $top
+if command -v gh >/dev/null 2>&1; then
+  gh_cmd=(env GH_PROMPT_DISABLED=1); command -v timeout >/dev/null 2>&1 && gh_cmd+=(timeout 20); gh_cmd+=(gh)
+fi
+pr_fmt='"#\(.number) \(.state)\(if .isDraft then " (draft)" else "" end)"'
+
+fetch_prs() { # fills pr_found[branch]="#12 OPEN, #9 MERGED (draft)" (newest first, 5 per branch like --limit 5)
+  local lines n=0 br summary
+  (( ${#gh_cmd[@]} )) || return 0
+  lines=$(cd "$top" && "${gh_cmd[@]}" pr list --state all --limit "$PR_LIMIT" --json number,state,isDraft,headRefName \
+      --jq ".[] | \"\(.headRefName)\t\" + $pr_fmt" 2>/dev/null) || return 0
+  pr_mode=listed
+  declare -A per_branch=()
+  while IFS=$'\t' read -r br summary; do
+    [[ -n $br ]] || continue
+    n=$((n + 1))
+    (( ${per_branch[$br]:-0} < 5 )) || continue
+    per_branch[$br]=$(( ${per_branch[$br]:-0} + 1 ))
+    pr_found[$br]=${pr_found[$br]:+${pr_found[$br]}, }$summary
+  done <<<"$lines"
+  (( n >= PR_LIMIT )) && pr_mode=truncated
+  return 0
+}
+
 pr_state() { # branch
   local out
-  command -v gh >/dev/null 2>&1 || { echo unknown; return; }
-  local t=(); command -v timeout >/dev/null 2>&1 && t=(timeout 20)
-  if out=$(cd "$top" && GH_PROMPT_DISABLED=1 "${t[@]}" gh pr list --head "$1" --state all --limit 5 \
-      --json number,state,isDraft \
-      --jq '.[] | "#\(.number) \(.state)\(if .isDraft then " (draft)" else "" end)"' 2>/dev/null); then
+  if [[ -n ${pr_found[$1]:-} ]]; then echo "${pr_found[$1]}"; return; fi
+  case $pr_mode in
+    unknown) echo unknown; return ;;
+    listed) echo none; return ;;
+  esac
+  # truncated: the branch may be past the page; ask for it alone (the pre-change query).
+  if out=$(cd "$top" && "${gh_cmd[@]}" pr list --head "$1" --state all --limit 5 \
+      --json number,state,isDraft --jq ".[] | $pr_fmt" 2>/dev/null); then
     [[ -n $out ]] && echo "${out//$'\n'/, }" || echo none
   else
     echo unknown
   fi
 }
+
+# Skip the network when no worktree has a branch to look up (bare or detached only).
+for br in "${branches[@]}"; do
+  if [[ $br != "(bare)" && $br != "(detached)" ]]; then fetch_prs; break; fi
+done
 
 if (( has_base )); then
   echo "Base: $BASE @ $(git -C "$top" rev-parse --short "$BASE")$( (( fetch )) || echo ' (not fetched; use --fetch to refresh)')"
