@@ -157,6 +157,9 @@ and `stderr` as regular single-link files; `tool_name` `Bash`, `tool_input.comma
 to the scenario command byte for byte, `cwd` equal to the disposable repository, non-empty
 `session_id` and `tool_use_id`; the scenario's exit/stderr/status conditions above; Codex
 exit 0. Evidence failures exit 1 with each reason, distinct from preflight refusals (2).
+The launch runs under `timeout -k 10s` with a limit of `CODEX_SMOKE_TIMEOUT` seconds
+(default 300; a positive integer, refused otherwise); a timed-out run records status 124
+and fails as `Codex timed out (exit 124)`.
 
 Codex's captured stderr is read with the v0.165 `exec --color never` human-output
 grammar ([`event_processor_with_human_output.rs`](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/exec/src/event_processor_with_human_output.rs),
@@ -301,8 +304,10 @@ fsmonitor are also disabled in the scrubbed preflight/child environment.
 
 Keep isolated `HOME` free of files and `CODEX_HOME` empty except for an exact existing
 trust artifact and, only in separately approved native mode, optional isolated
-`auth.json` containing solely an `OPENAI_API_KEY` string. Do not copy production
-credentials. ChatGPT identity, normal profiles, cached cloud policy, user hooks, plugins,
+`auth.json` containing solely an `OPENAI_API_KEY` string. A native run leaves sessions,
+logs and cache behind in both, and the runner refuses that leftover state rather than
+allowlisting it, so prepare a fresh disposable root for every native run. Do not copy
+production credentials. ChatGPT identity, normal profiles, cached cloud policy, user hooks, plugins,
 other config and special files are refused. API-key-only auth cannot fetch workspace
 managed config in the referenced
 [`exec` bootstrap](https://github.com/openai/codex/blob/rust-v0.165.0/codex-rs/exec/src/lib.rs).
