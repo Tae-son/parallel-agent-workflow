@@ -145,6 +145,30 @@ const mustBlock = [
   'gh api graphql --input body.json',
   'gh api graphql --input=body.json',
   "gh api -f query='mutation{x}' graphql",
+  // PR approvals are owner-only (gh pr review --approve / -a in any position or short-flag group)
+  'gh pr review 5 --approve',
+  'gh pr review --approve 5',
+  'gh pr review --approve',
+  'gh pr review https://github.com/o/r/pull/5 --approve',
+  'gh pr review 5 -a',
+  'gh pr review -a 5',
+  'gh pr review 5 -ab "looks good"',
+  'gh pr review 5 -ca',
+  'gh pr review 5 -ab=ok',
+  'gh pr review 5 --approve -b ok',
+  'gh pr review 5 -b ok --approve',
+  'gh pr review 5 --body ok --approve',
+  'gh pr review 5 -F body.md -a',
+  'gh pr review -R o/r 5 --approve',
+  'gh -R o/r pr review 5 --approve',
+  'gh --repo o/r pr review --approve 5',
+  'gh pr review 5 --approve --body-file -',
+  'true && gh pr review 5 --approve',
+  "bash -c 'gh pr review 5 --approve'",
+  // the API routes to an approval are caught by the existing gh api rules
+  'gh api -X POST repos/o/r/pulls/5/reviews -f event=APPROVE',
+  'gh api repos/o/r/pulls/5/reviews -f event=APPROVE',
+  "gh api graphql -f query='mutation { addPullRequestReview(input: {pullRequestId: \"x\", event: APPROVE}) { clientMutationId } }'",
 ];
 
 const mustAllow = [
@@ -193,6 +217,20 @@ const mustAllow = [
   "gh api graphql -f query='query { viewer { login } }'",
   "gh api graphql -f query='{ repository(owner: \"o\", name: \"r\") { pullRequest(number: 5) { mergeable } } }'",
   "gh api graphql -f query='{ viewer { mutationsCount: login } }'",
+  // QA may comment and request changes; only approving is owner-only
+  'gh pr review 5 --comment -b ok',
+  'gh pr review --request-changes 5',
+  'gh pr review 5 -r -b "needs more tests"',
+  'gh pr review 5 -cb "comment only"',
+  'gh pr review 5 -ba',
+  'gh pr review 5 -b approve',
+  'gh pr review 5 --body=--approve',
+  'gh pr review 5 -c -F -',
+  'gh pr review 5 --comment -- --approve',
+  'gh pr review 5',
+  'gh pr view 5',
+  'gh pr view 5 --json reviews',
+  'gh api repos/o/r/pulls/5/reviews',
 ];
 
 for (const command of mustBlock) {
