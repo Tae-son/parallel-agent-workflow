@@ -113,7 +113,13 @@ const tmpDirs = [];
 after(() => { for (const d of tmpDirs) fs.rmSync(d, { recursive: true, force: true }); });
 
 const shq = (s) => `'${String(s).replaceAll("'", "'\\''")}'`;
+let ttyRuns = 0;
 
+// tty: the answers reach /dev/tty through util-linux `script`. Once `script`'s stdin hits EOF it stops
+// servicing the pty for up to 2 s while typed lines are still unread (the child never prompts, or pages
+// more than the pty buffers before its next read) and ~0.25 s otherwise, so a shell feeds the answers from
+// a FIFO it holds open read-write: stdin never reaches EOF. The trailing ^D still makes a prompt past the
+// last answer read EOF (an empty answer), exactly as `script`'s own EOF handling did.
 function run(ctx, { answers = '', env = {}, tty = true, head = ctx.head } = {}) {
   const out = path.join(ctx.tmp, `out-${head}`);
   const args = ['--repo-root', ctx.repo, '--base', ctx.base, '--head', head, '--pr', '7', '--contract', ctx.contract, '--out', out];
@@ -122,8 +128,9 @@ function run(ctx, { answers = '', env = {}, tty = true, head = ctx.head } = {}) 
     CODEX_BIN: ctx.stub, STUB_DIR: ctx.stubDir, XDG_STATE_HOME: ctx.state, ...env,
   };
   const r = tty
-    ? spawnSync('script', ['-qec', [ctx.script, ...args].map(shq).join(' '), '/dev/null'],
-      { input: answers, encoding: 'utf8', env: fullEnv, timeout: 90_000 })
+    ? spawnSync('sh', ['-c', 'mkfifo "$2" && exec 0<>"$2" && printf %s "$0" >&0 && exec script -qec "$1" /dev/null',
+      `${answers}\x04`, [ctx.script, ...args].map(shq).join(' '), path.join(ctx.tmp, `tty-in-${++ttyRuns}`)],
+      { encoding: 'utf8', env: fullEnv, timeout: 90_000 })
     : spawnSync(ctx.script, args, { input: '', encoding: 'utf8', env: fullEnv, detached: true, timeout: 90_000 });
   return { status: r.status, text: `${r.stdout}${r.stderr}`.replaceAll('\r', ''), out };
 }
@@ -317,7 +324,8 @@ test('4th distinct head for the same PR hits the cycle cap', () => {
     const r = run(ctx, { head, answers: 'send 1\n', env: { STUB_MODE: 'none' } });
     assert.equal(r.status, 0, r.text);
   }
-  const fourth = run(ctx, { head: ctx.heads[3], answers: 'send 1\n', env: { STUB_MODE: 'none' } });
+  // The cap refuses before /dev/tty is opened, so no answer is typed.
+  const fourth = run(ctx, { head: ctx.heads[3], env: { STUB_MODE: 'none' } });
   assert.equal(fourth.status, 2, fourth.text);
   assert.match(fourth.text, /3 Codex cycles done for this PR — decide without Codex or split the PR/);
   assert.equal(calls(ctx), 3);

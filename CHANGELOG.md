@@ -29,6 +29,9 @@
 - `scripts/agents-status.sh`: fetches the PR list once (`gh pr list --state all --limit 200`)
   instead of once per worktree, falling back to the per-branch query only for branches missing
   from a full page.
+- `tests/codex-review.test.mjs` runs in about 4 s instead of 18 s: typed owner answers reach
+  util-linux `script` from a FIFO the shell holds open, so its stdin never hits EOF (that path
+  stalled the pty for up to 2 s per run). Assertions are unchanged.
 
 ## 0.1.0 (2026-10-28)
 
