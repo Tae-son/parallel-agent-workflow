@@ -26,6 +26,11 @@
   `gh pr review --approve`/`-a` in any flag position, including `-R` before `pr` and short-flag
   groups such as `-ab`; approvals are owner-only and QA records its verdict in the
   `independent-qa` block. `--comment` and `--request-changes` stay allowed.
+- `scripts/codex-smoke.sh`: the Codex launch is bounded by `CODEX_SMOKE_TIMEOUT` seconds
+  (default 300, reported as `Codex timed out (exit 124)`); leftover HOME/CODEX_HOME refusals
+  say to prepare a fresh disposable root per native run; the fixture-hook, guard and
+  trusted-hash pins and the trust artifact are each defined once; a missing-hook-lines
+  failure hints at an output-grammar change; a trailing slash on a boundary path is accepted.
 
 ## 0.1.0 (2026-10-28)
 
