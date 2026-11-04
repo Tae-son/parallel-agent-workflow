@@ -18,6 +18,7 @@ const gitEnv = {
   ...process.env,
   GIT_CONFIG_GLOBAL: '/dev/null',
   GIT_CONFIG_NOSYSTEM: '1',
+  GIT_TERMINAL_PROMPT: '0',   // a real fetch (e.g. env-org/env-repo) must fail, not ask the pty for credentials
   GIT_AUTHOR_NAME: 'Fixture',
   GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
   GIT_COMMITTER_NAME: 'Fixture',
@@ -166,17 +167,21 @@ function codexStub(marker, exitCode, outcome) {
 
 const quote = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`;
 
-// tty: drive /dev/tty via util-linux `script` (answers typed on its stdin); otherwise run in a new
-// session with no controlling terminal.
+let ttyRuns = 0;
+
+// tty: the answers reach /dev/tty through util-linux `script`. Once its stdin hits EOF it stops servicing
+// the pty for up to 2 s while typed lines are unread, so a shell feeds the answers from a FIFO it holds open
+// read-write; the trailing ^D still makes a prompt past the last answer read EOF. Otherwise: no terminal.
 function land(fx, args = [String(N)], { answers = '', tty = true, landPath, repoEnv = REPO } = {}) {
   const script = landPath ?? path.join(fx.primary, 'scripts/land.sh');
   // TMPDIR: land.sh keeps its land-codex-* review dir on purpose; put it inside the fixture so it is cleaned up too.
   const env = { ...gitEnv, PATH: `${fx.bin}:${process.env.PATH}`, SHELL: '/bin/bash', LAND_GH_STUB_DIR: fx.stub, GIT_CONFIG_GLOBAL: fx.globalConfig ?? '/dev/null', TMPDIR: fx.dir };
   if (repoEnv !== null) env.LAND_REPO = repoEnv; else delete env.LAND_REPO;
-  const opts = { cwd: fx.primary, env, input: answers, encoding: 'utf8', timeout: 30000 };
+  const opts = { cwd: fx.primary, env, encoding: 'utf8', timeout: 30000 };
   const r = tty
-    ? spawnSync('script', ['-qec', [script, ...args].map(quote).join(' '), '/dev/null'], opts)
-    : spawnSync('setsid', ['-w', script, ...args], opts);
+    ? spawnSync('sh', ['-c', 'mkfifo "$2" && exec 0<>"$2" && printf %s "$0" >&0 && exec script -qec "$1" /dev/null',
+      `${answers}\x04`, [script, ...args].map(quote).join(' '), path.join(fx.dir, `tty-in-${++ttyRuns}`)], opts)
+    : spawnSync('setsid', ['-w', script, ...args], { ...opts, input: answers });
   const merges = fs.existsSync(path.join(fx.stub, 'merge.log'))
     ? fs.readFileSync(path.join(fx.stub, 'merge.log'), 'utf8').trim().split('\n') : [];
   const output = `${r.stdout}${r.stderr}`;

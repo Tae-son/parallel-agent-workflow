@@ -109,7 +109,8 @@ test('a kept, customised skill copy that differs from the other copy is reported
   const r = install(['--owner', 'someone', '--no-tests', target]);
   assert.equal(r.status, 0, text(r));
   assert.equal(fs.readFileSync(skill, 'utf8'), '# Customised workflow\n');
-  assert.match(r.stdout, /Notes:[^\n]*\n(\s+.*\n)*\s+\.claude\/skills\/parallel-agent-workflow\/SKILL\.md and \.agents\/skills\/parallel-agent-workflow\/SKILL\.md differ/);
+  // Indented lines belong to the preceding label; `(?:  .*\n)*` cannot backtrack across newlines.
+  assert.match(r.stdout, /^Notes:\n(?:  .*\n)*  \.claude\/skills\/parallel-agent-workflow\/SKILL\.md and \.agents\/skills\/parallel-agent-workflow\/SKILL\.md differ/m);
   const clean = freshRepo('skill-same');
   assert.doesNotMatch(install(['--owner', 'someone', '--no-tests', clean]).stdout, /differ \(an existing copy was kept\)/);
 });
