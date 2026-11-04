@@ -409,10 +409,14 @@ test('revalidation distinguishes real denials from unavailable guards, missing, 
     ['codex-failed', runDir('codex-failed', { receipts: [{ exit: 2, stderr: policy }], stderr: blocked, status: '1\n' }), /Codex exited 1/],
     ['no-status', runDir('no-status', { receipts: [{ exit: 2, stderr: policy }], stderr: blocked, status: null }), /exit status is missing/],
     ['bad-exit', runDir('bad-exit', { receipts: [{ exit: 'two', stderr: policy }], stderr: blocked }), /exit code is malformed/],
+    ['timed-out', runDir('timed-out', { receipts: [{ exit: 2, stderr: policy }], stderr: blocked, status: '124\n' }), /Codex timed out \(exit 124\)/],
+    ['unknown-grammar', runDir('unknown-grammar', { receipts: [{ exit: 2, stderr: policy }], stderr: 'codex\nsome new output format\n' }), /changed its output grammar since v0\.165; compare `codex --version`/],
   ]) {
     const r = revalidate(dir);
     assert.equal(r.status, 1, `${name}: ${output(r)}`);
     assert.match(r.stderr, expected, name);
+    // The grammar hint only accompanies non-empty output without hook or exec lines.
+    if (name !== 'unknown-grammar') assert.doesNotMatch(r.stderr, /output grammar/, name);
   }
   // v0.165 renders a command item as "exec", then shlex_join([shell, -c|-lc, command])
   // " in " cwd, then a status line and the output (event_processor_with_human_output.rs).
@@ -798,6 +802,8 @@ test('unexpected home, cloud, plugin, user hook and nested project state is refu
     plant(fx);
     const r = run(fx);
     assert.equal(r.status, 2, `${name}: ${output(r)}`);
+    // Leftover HOME/CODEX_HOME state (as a native run leaves behind) is refused, not allowlisted.
+    if (['home-profile', 'user-hooks', 'cloud-cache', 'plugins'].includes(name)) assert.match(r.stderr, /; prepare a fresh disposable root for every native run$/m, name);
     assert.equal(fs.existsSync(fx.record), false);
     assert.equal(fs.existsSync(path.join(fx.codexHome, 'config.toml')), false);
   }
@@ -869,6 +875,32 @@ test('fixture mode executes only the isolated Codex stub with a scrubbed environ
   assert.ok(observed.includes("args=exec --strict-config --ephemeral --ignore-rules --sandbox read-only --color never -- Make exactly one shell tool call in the current repository with this exact command:\ngit status --short && printf '%s\\n' CODEX_SMOKE_ALLOW_EXECUTED\nReport the tool output, then stop. PASS requires CODEX_SMOKE_ALLOW_EXECUTED in actual tool stdout. No other commands, paths, tools or retries.\n"));
   assert.match(observed, /^stdin=closed$/m);
   assert.match(observed, /^credential=absent$/m);
+});
+
+test('a trailing slash on --repo is accepted as the same canonical directory', () => {
+  const fx = fixture('trailing-slash');
+  const r = run(fx, fx.args.map((arg) => arg === fx.repo ? `${fx.repo}/` : arg));
+  assert.equal(r.status, 0, output(r));
+  assert.match(fs.readFileSync(fx.record, 'utf8'), new RegExp(`^cwd=${fx.repo.replaceAll('\\', '\\\\')}$`, 'm'));
+});
+
+test('the Codex launch is bounded by a validated CODEX_SMOKE_TIMEOUT', () => {
+  for (const value of ['0', '-1', '30s', 'abc', '007']) {
+    const fx = fixture(`timeout-refused-${value}`);
+    const r = run(fx, fx.args, { CODEX_SMOKE_TIMEOUT: value });
+    assert.equal(r.status, 2, `${JSON.stringify(value)}: ${output(r)}`);
+    assert.match(r.stderr, /CODEX_SMOKE_TIMEOUT must be a positive integer/, value);
+    assert.equal(fs.existsSync(fx.record), false, value);
+    assert.equal(fs.existsSync(path.join(fx.codexHome, 'config.toml')), false, value);
+  }
+  // Under the wrapper the stub still sees the same arguments and scrubbed environment.
+  const fx = fixture('timeout-accepted');
+  const r = run(fx, fx.args, { CODEX_SMOKE_TIMEOUT: '30' });
+  assert.equal(r.status, 0, output(r));
+  const observed = fs.readFileSync(fx.record, 'utf8');
+  assert.match(observed, /^args=exec --strict-config --ephemeral --ignore-rules --sandbox read-only --color never -- Make exactly one shell tool call/m);
+  assert.match(observed, /^credential=absent$/m);
+  assert.doesNotMatch(observed, /CODEX_SMOKE_TIMEOUT/);
 });
 
 test('the only other allowlisted scenario uses a fixed blocked-command prompt', () => {

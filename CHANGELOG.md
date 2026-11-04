@@ -32,6 +32,11 @@
 - `tests/codex-review.test.mjs` runs in about 4 s instead of 18 s: typed owner answers reach
   util-linux `script` from a FIFO the shell holds open, so its stdin never hits EOF (that path
   stalled the pty for up to 2 s per run). Assertions are unchanged.
+- `scripts/codex-smoke.sh`: the Codex launch is bounded by `CODEX_SMOKE_TIMEOUT` seconds
+  (default 300, reported as `Codex timed out (exit 124)`); leftover HOME/CODEX_HOME refusals
+  say to prepare a fresh disposable root per native run; the fixture-hook, guard and
+  trusted-hash pins and the trust artifact are each defined once; a missing-hook-lines
+  failure hints at an output-grammar change; a trailing slash on a boundary path is accepted.
 
 ## 0.1.0 (2026-10-28)
 
