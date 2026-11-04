@@ -2,9 +2,10 @@
 // agent-guard.mjs: Claude Code PreToolUse hook for the Bash tool.
 //
 // GUARDRAIL, NOT A SECURITY BOUNDARY. It stops accidental and ordinary attempts by
-// parallel agents to push to main, force-push, merge pull requests, write through
-// `gh api`, run the owner-only scripts/land.sh, run the codex CLI or
-// scripts/codex-review.sh, or commit/merge/rebase/cherry-pick/revert/am/pull
+// parallel agents to push to main, force-push, merge pull requests, approve pull
+// requests (`gh pr review --approve`; `--comment` and `--request-changes` stay
+// allowed), write through `gh api`, run the owner-only scripts/land.sh, run the codex
+// CLI or scripts/codex-review.sh, or commit/merge/rebase/cherry-pick/revert/am/pull
 // (without --ff-only)/reset --hard while on main. Hooks still run in
 // bypass-permissions mode, which is why this is a hook and not a deny rule.
 // A determined process can evade it. Known gaps: command words built at run time
@@ -26,6 +27,7 @@ import path from 'node:path';
 const OWNER_MERGE = 'merging is owner-only; leave the PR open and ask the owner to run scripts/land.sh <PR#> in their own terminal';
 const PUSH_MAIN = 'pushing to main is owner-only; push your feature branch (git push -u origin <branch>) and open a PR';
 const FORCE = 'force-push blocked; push a new commit instead, or use --force-with-lease on your own feature branch';
+const APPROVE = 'gh pr review --approve blocked: approvals are owner-only; QA records its verdict in the independent-qa block of the PR body instead (--comment and --request-changes stay allowed)';
 const CODEX = 'the codex CLI / scripts/codex-review.sh is owner-run; ask the owner to run the review';
 
 // ---- Tokenizer: splits a shell string into simple commands (arrays of words). ----
@@ -247,6 +249,7 @@ function checkGh(args) {
     else if (!args[i].startsWith('-')) positional.push(args[i]);
   }
   if (positional[0] === 'pr' && positional[1] === 'merge') return `gh pr merge blocked: ${OWNER_MERGE}`;
+  if (positional[0] === 'pr' && positional[1] === 'review' && reviewApproves(args.slice(args.indexOf('review') + 1))) return APPROVE;
   if (positional[0] !== 'api') return null;
   if (args.some((a) => /mergePullRequest|enablePullRequestAutoMerge/.test(a))) return `gh api merge call blocked: ${OWNER_MERGE}`;
   // Endpoint = first positional after `api`, skipping the values of options that take one.
@@ -273,6 +276,26 @@ function checkGh(args) {
   const verb = (method ?? (hasFields ? 'POST' : 'GET')).toUpperCase();
   if (verb !== 'GET' && verb !== 'HEAD') return `gh api writes are owner-only (${verb}); use read-only GET calls or ask the owner`;
   return null;
+}
+
+// `gh pr review` approves with --approve or -a, anywhere among its flags. In a short-flag
+// group (-ab ok) the booleans a/c/r may be followed by one of b/F/R, which takes the rest
+// of the group or the next word as its value (-ba is body="a", not approve).
+function reviewApproves(rest) {
+  const VALUE_OPTS = ['-b', '--body', '-F', '--body-file', '-R', '--repo'];
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i];
+    if (a === '--') break;
+    if (/^--approve(=|$)/.test(a)) return true;
+    if (VALUE_OPTS.includes(a)) { i++; continue; }
+    if (!/^-[A-Za-z]/.test(a)) continue; // positional, --long=value or --long
+    for (const ch of a.slice(1)) {
+      if (ch === 'a') return true;
+      if ('bFR'.includes(ch)) { if (a.endsWith(ch)) i++; break; } // value attached (-abok, -ab=ok) or in the next word
+      if (!/[A-Za-z]/.test(ch)) break;
+    }
+  }
+  return false;
 }
 
 // ---- Entry point ----

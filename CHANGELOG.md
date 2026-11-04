@@ -22,6 +22,10 @@
   longer uses a catastrophically backtracking regex, `tests/land.test.mjs` feeds typed answers to
   util-linux `script` through a FIFO held open so its stdin never hits EOF (which made it wait 2 s
   whenever the child exited with answers unread), and `lint` now also checks `scripts/codex-smoke.sh`.
+- `agent-guard.mjs` (shared by the Claude Code, Codex and Hermes hooks) blocks
+  `gh pr review --approve`/`-a` in any flag position, including `-R` before `pr` and short-flag
+  groups such as `-ab`; approvals are owner-only and QA records its verdict in the
+  `independent-qa` block. `--comment` and `--request-changes` stay allowed.
 
 ## 0.1.0 (2026-10-28)
 
