@@ -26,6 +26,9 @@
   `gh pr review --approve`/`-a` in any flag position, including `-R` before `pr` and short-flag
   groups such as `-ab`; approvals are owner-only and QA records its verdict in the
   `independent-qa` block. `--comment` and `--request-changes` stay allowed.
+- `scripts/agents-status.sh`: fetches the PR list once (`gh pr list --state all --limit 200`)
+  instead of once per worktree, falling back to the per-branch query only for branches missing
+  from a full page.
 
 ## 0.1.0 (2026-10-28)
 
