@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `scripts/codex-review.sh` classifies gate and risky files exactly like `land.sh`: a pattern
+  ending in `/` is a directory prefix, a leading byte-order mark no longer disables the first
+  pattern, and `codex-exclude.txt` lines are parsed by the same rule. Before, a file matched only
+  by a trailing-slash pattern was shown as a gate change by `land.sh` but left out of the Codex review.
 - `AGENTS.md`: a short router for every agent (Codex and OpenCode read it at session start;
   Claude Code reads it when there is no `CLAUDE.md`, and this repository's `CLAUDE.md` imports
   it). It points to `CONTRIBUTING.md` and the `parallel-agent-workflow` skill and states the
