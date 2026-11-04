@@ -498,6 +498,18 @@ test('filled PR template with CRLF line endings is parsed', () => {
   assert.match(r.output, /OUTSIDE declared scope[^\n]*\n\s+A\s+src\/not-a-glob\.js/);
 });
 
+test('a trailing-slash Allowed path is a literal prefix: a glob before the slash does not expand', () => {
+  const fx = makeFixture({
+    files: { 'src/x/app.js': 'x\n', 'src/*/lit.js': 'x\n' },
+    pr: { body: 'Approved brief: https://example.invalid/brief\n\nAllowed paths:\n- src/*/\n' },
+  });
+  const r = land(fx, undefined, { answers: `${N}\npreview checked\n` });
+  assertMerged(r, fx);
+  assert.match(r.output, /Allowed paths: src\/\*\/ \n/);
+  assert.match(r.output, /In declared scope:\s+A\s+src\/\*\/lit\.js\n/);
+  assert.match(r.output, /OUTSIDE declared scope[^\n]*\n\s+A\s+src\/x\/app\.js/);
+});
+
 test('PR-controlled text is printed without raw control characters', () => {
   const r = land(makeFixture({ pr: { title: 'Evil\x1b[2J title\rspoof\u009b end' } }), undefined, { tty: false });
   assert.match(r.output, /Title: +Evil\?\[2J title\?spoof\? end/);

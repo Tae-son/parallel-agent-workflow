@@ -274,14 +274,8 @@ parse_globs() {
   done < <(section 'Allowed paths' para)
 }
 
-in_scope() {
-  local g
-  for g in "${GLOBS[@]}"; do
-    if [[ $g == */ ]]; then [[ $1 == $g* ]] && return 0
-    else [[ $1 == $g ]] && return 0; fi
-  done
-  return 1
-}
+# Allowed paths use match_any: a trailing "/" is a literal directory prefix, anything else a glob.
+in_scope() { match_any "$1" "${GLOBS[@]}"; }
 
 # Pattern lists share the gate-files.txt format: one bash pattern per line, "#" comments.
 # -a: a NUL or invalid byte in the file must not make grep go silent and empty the list.
