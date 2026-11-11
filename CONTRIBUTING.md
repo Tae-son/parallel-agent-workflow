@@ -229,6 +229,19 @@ results, and displays the evidence. It refuses missing, malformed, FAIL, BLOCKED
 reports and nonempty blockers. It re-reads the entire PR body before merging and refuses any
 change during owner review, including withdrawal of QA or edits to the brief. Do not edit the
 body while the owner lands it. This is a gate check, not automatic reviewer orchestration.
+The report rules live in `scripts/independent-qa.jq`, which `land.sh` reads from `main`'s
+exact commit, never from the pull request or the working tree; a PR that edits it is a gate
+change and is still judged by `main`'s copy.
+
+**Visible status (this kit's repository):** `.github/workflows/independent-qa.yml` runs the
+same rules from the default branch on PR events and posts an `independent-qa` commit status
+on the PR's head: `pending`, then `success` for a structurally valid PASS report on that
+exact head, or `failure`. It never runs PR code. It is visibility, not authentication or a
+merge barrier: a status belongs to a commit SHA rather than a PR, an earlier `success` can
+remain if a later run cannot post, and other workflows or tokens with status access can post
+the same context. `land.sh` does not rely on it. See `docs/design.md` for the limits,
+including GitHub's default blocking of `pull_request_target` in public repositories from
+2 December 2026; allowing it is a separate owner decision. `install.sh` does not install it.
 
 **Trust limit:** a shared GitHub account cannot prove which agent wrote a report. Session
 IDs and evidence are declarations, not authentication. The gate cannot judge completeness

@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- Independent QA rules moved, unchanged, from `scripts/land.sh` into one jq module,
+  `scripts/independent-qa.jq`. `land.sh` reads it from main's exact commit (never the PR or
+  the working tree) and refuses when it is missing on main or does not compile. `install.sh`
+  installs it. New `.github/workflows/independent-qa.yml` and
+  `scripts/independent-qa-status.sh` (kit repository only, not installed) post an
+  `independent-qa` commit status on each PR's head from the same rules: `pending`, then
+  `success` or `failure` only if a re-read shows the head and body unchanged. It runs on
+  `pull_request_target` from the default branch with read-only contents/PRs and
+  `statuses: write`, never runs PR code, and is visibility only, not authentication or a
+  merge barrier. Not yet exercised on real GitHub; see `docs/design.md` for the limits,
+  including GitHub's default blocking of `pull_request_target` in public repositories from
+  2 December 2026.
 - `scripts/codex-review.sh` classifies gate and risky files exactly like `land.sh`: a pattern
   ending in `/` is a directory prefix, a leading byte-order mark no longer disables the first
   pattern, and `codex-exclude.txt` lines are parsed by the same rule. Before, a file matched only

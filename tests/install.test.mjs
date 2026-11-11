@@ -37,7 +37,7 @@ const EXPECTED = [
   '.hermes/plugins/parallel-agent-guard/__init__.py', 'tests/hermes-agent-guard.test.mjs',
   'docs/agent-support.md',
   '.codex/hooks.json', 'tests/codex-hook.test.mjs',
-  'scripts/land.sh', 'scripts/codex-review.sh', 'scripts/agents-status.sh', 'scripts/gate-files.txt',
+  'scripts/land.sh', 'scripts/independent-qa.jq', 'scripts/codex-review.sh', 'scripts/agents-status.sh', 'scripts/gate-files.txt',
   'scripts/ui-paths.txt', 'scripts/risky-paths.txt', 'scripts/codex-exclude.txt', 'scripts/codex-review-contract.md',
   '.githooks/pre-push', '.github/pull_request_template.md', '.github/workflows/ci.yml', '.github/CODEOWNERS',
   '.claude/hooks/agent-guard.mjs', '.claude/settings.json', 'CONTRIBUTING.md', 'AGENTS.md',
@@ -64,6 +64,11 @@ test('installs every kit file into a fresh repository, byte-identical, executabl
   assert.equal(fs.readFileSync(path.join(target, '.github/CODEOWNERS'), 'utf8'), '* @someone\n');
   assert.equal(git(target, 'config', 'core.hooksPath'), '.githooks');
   assert.ok(!fs.existsSync(path.join(target, 'install.sh')), 'the installer must not copy itself');
+  // land.sh needs the shared QA rules; the privileged status workflow and its runner stay kit-only.
+  assert.equal(fs.statSync(path.join(target, 'scripts/independent-qa.jq')).mode & 0o777, 0o644);
+  for (const f of ['.github/workflows/independent-qa.yml', 'scripts/independent-qa-status.sh', 'tests/independent-qa.test.mjs']) {
+    assert.ok(!fs.existsSync(path.join(target, f)), `${f} must not be installed`);
+  }
   assert.ok(!fs.existsSync(path.join(target, 'README.md.kit')));
   assert.equal(fs.readFileSync(path.join(target, 'README.md'), 'utf8'), 'target\n', 'target README untouched');
   assert.match(r.stdout, /Bootstrap rule/);

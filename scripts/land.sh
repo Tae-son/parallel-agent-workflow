@@ -213,27 +213,20 @@ read_pr() {
 }
 
 
+# The QA report rules come from main's exact commit, never from the PR or the working tree.
+load_qa_rules() {
+  mkdir "$TMP/jq"
+  git show "$MAIN_SHA:scripts/independent-qa.jq" >"$TMP/jq/independent-qa.jq" 2>/dev/null \
+    || die "scripts/independent-qa.jq is missing on main; cannot check the independent QA report"
+  jq -n -L "$TMP/jq" 'include "independent-qa"; empty' >/dev/null 2>&1 \
+    || die "scripts/independent-qa.jq on main does not compile; cannot check the independent QA report"
+}
+
 # Read QA from the raw PR body, not the Markdown-light scope parser. Never execute it.
 check_qa() {
-  jq -e '
-    .body | select(type == "string")
-    | select(([scan("(?m)^```independent-qa\\r?$")] | length) == 1)
-    | capture("(?m)^```independent-qa\\r?\n(?<report>[\\s\\S]*?)^```\\r?$")
-    | .report | fromjson | select(type == "object")
-  ' "$TMP/pr.json" >"$TMP/qa.json" 2>/dev/null \
+  jq -e -L "$TMP/jq" 'include "independent-qa"; qa_report' "$TMP/pr.json" >"$TMP/qa.json" 2>/dev/null \
     || die "missing or malformed independent QA report; see CONTRIBUTING.md"
-  jq -e --arg head "$HEAD_SHA" '
-    def text: type == "string" and test("[^\\s]");
-    def session: type == "string" and test("\\A[A-Za-z0-9][A-Za-z0-9._:/-]*\\z");
-    (keys == ["blockers", "builder", "checks", "head", "limitations", "reviewer", "verdict", "version"])
-    and .version == 1 and .head == $head and .verdict == "PASS"
-    and (.builder | session) and (.reviewer | session) and .builder != .reviewer
-    and (.limitations | text)
-    and (.blockers | type == "array" and length == 0)
-    and (.checks | type == "array" and length > 0 and all(.[];
-      type == "object" and keys == ["criterion", "evidence", "result"]
-      and (.criterion | text) and (.evidence | text) and .result == "PASS"))
-  ' "$TMP/qa.json" >/dev/null 2>&1 \
+  jq -e -L "$TMP/jq" --arg head "$HEAD_SHA" 'include "independent-qa"; qa_pass($head)' "$TMP/qa.json" >/dev/null 2>&1 \
     || die "independent QA requires version 1, distinct builder/reviewer sessions, PASS with evidence for every check, no blockers, limitations and the exact head SHA"
 }
 
@@ -498,6 +491,7 @@ main() {
   load_gate_list
   load_ui_list
   load_risky_list
+  load_qa_rules
   check_current
   classify
   check_ui
