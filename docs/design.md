@@ -107,6 +107,67 @@ GitHub protection for bypass resistance. These limits are disclosed rather than 
 as an authenticated QA service. The first PR adding QA lands under the old trusted gate,
 with independent QA performed procedurally; subsequent PRs use the new gate from `main`.
 
+The report rules live in one jq module, `scripts/independent-qa.jq`. `land.sh` reads it with
+`git show` from main's exact commit into its own temporary directory, so a PR (or a dirty
+working tree) that loosens the rules is still judged by main's copy and shows up as a gate
+diff. A main without the module, or with one that does not compile, refuses. `install.sh`
+installs the module because `land.sh` needs it.
+
+### Visible `independent-qa` commit status (kit repository only)
+
+`.github/workflows/independent-qa.yml` makes the same structural verdict visible on the PR.
+On `pull_request_target` (opened, edited, synchronize, reopened, ready_for_review, base
+`main`) it checks out the default branch with the pinned `actions/checkout` and no persisted
+credentials, and runs `scripts/independent-qa-status.sh OWNER/NAME PR#` with `GH_TOKEN` from
+`github.token` only. Permissions are `{}` at the top and `contents: read`,
+`pull-requests: read`, `statuses: write` for the one five-minute job. The job never checks out,
+builds or runs PR code, downloads artifacts, uses caches or interpolates PR text into a shell.
+The job's own check (`publish-status`) attaches to the base commit; the result the PR shows is
+the separate commit status `independent-qa` that the runner posts on the PR's head SHA.
+
+The runner ignores the event payload and re-reads the PR from the API. It validates the
+repository, PR number and lowercase 40-hex head, posts `pending`, evaluates
+`qa_report | qa_pass($head)` from the module beside it (plus open and base `main`), re-reads
+the PR, and posts `success` or `failure` only if head, body, state and base are unchanged.
+Otherwise it exits nonzero and leaves `pending`; the event for the change runs it again.
+Descriptions are fixed strings, so PR text never reaches a status, argv or the log. API, JSON
+or jq errors exit nonzero and never publish a new success. Concurrency is one group per PR
+with `cancel-in-progress: false`: GitHub keeps one running and at most one pending run, a
+newer pending run can replace an older one, and order is not guaranteed, which is why every
+run reads current API data rather than trusting that each edit is processed.
+
+Limits of this status, which is visibility, not a security boundary:
+
+- It is structural evidence validation, not authentication or proof that the testing
+  happened, and not an atomic barrier: the body can change after the final read. `land.sh`
+  still re-reads the whole body and remains the owner's gate; it does not consult the status.
+- A cached `success` can outlive its basis. If posting `pending` fails (an API outage) or the
+  event for a body edit is delayed or dropped, an earlier `success` on that SHA stays until a
+  later run replaces it. This job cannot revoke an old status during an outage.
+- A commit status belongs to a SHA and context, not to a PR. Two PRs with the same head share
+  one `independent-qa` status, last writer wins, and any token or workflow with
+  `statuses: write` (including another same-repository workflow) can post a structurally
+  plausible status under the same context. Pinning the status to the GitHub Actions app in
+  branch protection narrows this but does not remove same-repository workflow forgery.
+  Treat this stage as visibility until permissions are separated and protection is configured;
+  credential separation and settings activation are separate owner tasks.
+- Bootstrap: `pull_request_target` runs the workflow from the default branch, so it does
+  nothing until it is on `main`; the PR that adds it cannot show its own status.
+- GitHub announced that `pull_request_target` is blocked by default in public repositories
+  from 2 December 2026 (brownout 16 November 2026, 16:00-18:00 UTC) unless an Actions event
+  policy permits it
+  ([changelog](https://github.blog/changelog/2026-11-02-pull_request_target-blocked-by-default-december-2/),
+  [guidance](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target)).
+  Allowing it for this metadata-only workflow is an owner decision to take narrowly, after
+  integration evidence from a disposable sandbox repository, not a blanket relaxation.
+- Not yet tested against real GitHub (needs a separately approved disposable repository):
+  status attachment to the head SHA, which edit and synchronize events actually fire,
+  token behaviour for fork PRs, the identity GitHub records for the status, branch-protection
+  enforcement of the context, and event-policy activation. The kit's tests use a fake `gh`
+  and static workflow checks, which cannot prove GitHub's runtime behaviour.
+- `install.sh` does not install the workflow or its runner: they need the owner's
+  permission and policy decisions above for each repository.
+
 ## Optional cross-model review
 
 `codex-review.sh` exists because a second model with a different training set catches a

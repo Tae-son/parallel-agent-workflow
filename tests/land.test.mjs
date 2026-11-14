@@ -11,6 +11,7 @@ const landSource = `${root}scripts/land.sh`;
 const ghStub = `${root}tests/helpers/land-gh-stub.mjs`;
 const gateList = `${root}scripts/gate-files.txt`;
 const uiList = `${root}scripts/ui-paths.txt`;
+const qaRules = `${root}scripts/independent-qa.jq`;
 const REPO = 'example-org/example-repo';
 const N = 7;
 
@@ -80,6 +81,7 @@ function makeFixture({
   gateListText,
   uiListOnMain = true,
   uiListText,
+  qaRulesOnMain = true,
   originUrl,
   codexExit,
   codexOutcome,
@@ -105,6 +107,7 @@ function makeFixture({
   else if (gateListOnMain) fs.copyFileSync(gateList, path.join(primary, 'scripts/gate-files.txt'));
   if (uiListText !== undefined) writeFiles(primary, { 'scripts/ui-paths.txt': uiListText });
   else if (uiListOnMain) fs.copyFileSync(uiList, path.join(primary, 'scripts/ui-paths.txt'));
+  if (qaRulesOnMain) fs.copyFileSync(qaRules, path.join(primary, 'scripts/independent-qa.jq'));
   if (codexExit !== undefined) {
     writeFiles(primary, { 'scripts/codex-exclude.txt': 'x\n', 'scripts/codex-review-contract.md': 'x\n' });
     fs.writeFileSync(path.join(primary, 'scripts/codex-review.sh'), codexStub('MAIN', codexExit, codexOutcome), { mode: 0o755 });
@@ -237,6 +240,8 @@ for (const [label, change] of [
   ['unresolved blocker', (r) => { r.blockers = ['Broken output']; }],
   ['wrong blockers type', (r) => { r.blockers = ''; }],
   ['missing limitations', (r) => { delete r.limitations; }],
+  ['blank limitations', (r) => { r.limitations = ' \n'; }],
+  ['invalid builder session', (r) => { r.builder = '-builder session'; }],
   ['unknown version', (r) => { r.version = 2; }],
   ['unexpected field', (r) => { r.approved = true; }],
 ]) {
@@ -283,6 +288,42 @@ test('independent QA: accepts a report with CRLF fence lines', () => {
   for (const view of data.prViews) view.body = view.body.replaceAll('\n', '\r\n');
   fs.writeFileSync(file, JSON.stringify(data));
   assertMerged(land(fx, undefined, { answers: typed }), fx);
+});
+
+test('independent QA: refuses a null PR body', () => {
+  const fx = makeFixture({ qa: null, pr: { body: null } });
+  assertRefused(land(fx, undefined, { answers: typed }), /missing or malformed independent QA report/);
+});
+
+test('independent QA: refuses when the rules are missing on main, even with a working-tree copy', () => {
+  const fx = makeFixture({ qaRulesOnMain: false });
+  fs.copyFileSync(qaRules, path.join(fx.primary, 'scripts/independent-qa.jq'));
+  assertRefused(land(fx, undefined, { answers: typed }), /scripts\/independent-qa\.jq is missing on main/);
+});
+
+test('independent QA: refuses when the rules on main do not compile', () => {
+  const fx = makeFixture({ qaRulesOnMain: false });
+  writeFiles(fx.primary, { 'scripts/independent-qa.jq': 'def qa_report: ;\n' });
+  git(fx.primary, 'add', '-A');
+  git(fx.primary, 'commit', '--quiet', '-m', 'broken rules');
+  git(fx.primary, 'push', '--quiet', 'origin', 'main');
+  const file = path.join(fx.stub, 'fixture.json');
+  const data = JSON.parse(fs.readFileSync(file, 'utf8'));
+  data.mainShas = [git(fx.primary, 'rev-parse', 'HEAD')];
+  fs.writeFileSync(file, JSON.stringify(data));
+  assertRefused(land(fx, undefined, { answers: typed }), /independent-qa\.jq on main does not compile/);
+});
+
+test('independent QA: a PR that loosens the rules is judged by main\'s rules and shown as a gate diff', () => {
+  const files = { 'docs/notes.md': 'x\n', 'scripts/independent-qa.jq': 'def qa_report: {}; # LOOSE-RULES\ndef qa_pass($head): true;\n' };
+  const blocked = makeFixture({ files, qa: (head) => ({ ...qaReport(head), verdict: 'BLOCKED' }) });
+  assertRefused(land(blocked, undefined, { answers: typed }), /independent QA requires version 1/);
+  const fx = makeFixture({ files });
+  const r = land(fx, undefined, { answers: typed });
+  assertRefused(r, /no confirmation \(EOF\)/);
+  assert.match(r.output, /\+def qa_report: \{\}; # LOOSE-RULES/);
+  assert.match(r.output, /Gate files:\s+M\s+scripts\/independent-qa\.jq/);
+  assertMerged(land(fx, undefined, { answers: `${N}\ngate\n` }), fx);
 });
 
 test('independent QA: displays hostile evidence as inert, sanitised data', () => {
