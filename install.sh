@@ -69,6 +69,7 @@ FILES=(
   .hermes/plugins/parallel-agent-guard/plugin.yaml
   .hermes/plugins/parallel-agent-guard/__init__.py
   scripts/land.sh
+  scripts/independent-qa.jq
   scripts/codex-review.sh
   scripts/agents-status.sh
   scripts/gate-files.txt

@@ -1,0 +1,45 @@
+# Publishes the "independent-qa" commit status on a pull request's head commit, from the
+# report in its current body (see CONTRIBUTING.md "Independent QA"). Visibility only: the
+# status is structural, not authentication, and scripts/land.sh stays the owner's merge gate.
+#
+# pull_request_target runs the default branch's copy of this file with a token that can write
+# statuses, so this job must never check out, build or run pull request code, download its
+# artifacts, use caches, read secrets or interpolate PR text into a shell. It runs only
+# scripts/independent-qa-status.sh from the default branch, which re-reads the PR via the API.
+name: Independent QA
+
+on:
+  pull_request_target:
+    branches: [main]
+    types: [opened, edited, synchronize, reopened, ready_for_review]
+
+permissions: {}
+
+# One running and at most one pending run per PR; a newer pending run may replace an older
+# one and order is not guaranteed, so every run reads the current PR rather than the event.
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+
+jobs:
+  publish-status:
+    name: publish-status
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      statuses: write
+
+    steps:
+      - name: Check out the default branch (never the pull request)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Publish the independent-qa status on the PR head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          QA_REPO: ${{ github.repository }}
+          QA_PR: ${{ github.event.pull_request.number }}
+        run: scripts/independent-qa-status.sh "$QA_REPO" "$QA_PR"
