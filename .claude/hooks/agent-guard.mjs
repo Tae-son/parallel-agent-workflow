@@ -320,14 +320,26 @@ try { input = JSON.parse(readFileSync(0, 'utf8')); } catch { process.exit(0); }
 const command = input?.tool_input?.command;
 if ((input?.tool_name && input.tool_name !== 'Bash') || typeof command !== 'string' || !command.trim()) process.exit(0);
 
-// Shell code injected into land.sh's environment could redefine its builtins; refuse it.
-if (/land\.sh/.test(command) && /\b(?:BASH_ENV|ENV|SHELLOPTS|BASHOPTS)=|\bexport\b[^;&|\n]*\s-f\b|BASH_FUNC_/.test(command)) {
-  process.stderr.write(`agent-guard: land.sh with an injected shell environment (BASH_ENV, ENV, exported functions) blocked: ${OWNER_MERGE}\n`);
-  process.exit(2);
-}
-
 // The approved form is matched on the whole command string, before any parsing.
 if (CLAUDE_ASK_RULE && APPROVED_FORM.test(command)) process.exit(0);
+
+// Any other command carrying --approved-sha is refused, whatever runs it (setsid, flock,
+// env -S, coproc, a function, ...): only the whole-command form above matches the ask rule.
+// Words are read after quote removal, so 'land''.sh' and BASH_E''NV count too.
+{
+  const cmds = [];
+  try { scan(command, 0, null, cmds); } catch { /* the main check below reports it */ }
+  const words = cmds.flat();
+  if (words.some((w) => w.includes('--approved-sha'))) {
+    process.stderr.write(`agent-guard: land.sh --approved-sha must be the whole command, exactly as --packet printed it (Claude Code only): ${OWNER_MERGE}\n`);
+    process.exit(2);
+  }
+  const text = words.join(' ');
+  if (/land\.sh/.test(text) && /\b(?:BASH_ENV|ENV|SHELLOPTS|BASHOPTS|POSIXLY_CORRECT)=|\b(?:export|declare|typeset)\b[^;&|\n]*\s-(?:f|fx|xf)\b|\bset\s+-a\b|\bset\s+-o\s+allexport\b|BASH_FUNC_/.test(text)) {
+    process.stderr.write(`agent-guard: land.sh with an injected shell environment (BASH_ENV, ENV, exported functions) blocked: ${OWNER_MERGE}\n`);
+    process.exit(2);
+  }
+}
 
 let reason;
 try {

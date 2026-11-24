@@ -350,3 +350,26 @@ test('sourcing land.sh or injecting a shell environment into it is blocked', () 
     assert.equal(runClaude(cmd).status, 2, cmd);
   }
 });
+
+test('--approved-sha inside any wrapper, function or quoting trick is blocked, even for Claude Code', () => {
+  for (const cmd of [
+    `setsid -w scripts/land.sh --approved-sha ${SHA} 5`, `ionice -c3 scripts/land.sh --approved-sha ${SHA} 5`,
+    `flock /tmp/x scripts/land.sh --approved-sha ${SHA} 5`, `taskset -c 0 scripts/land.sh --approved-sha ${SHA} 5`,
+    `env -S 'scripts/land.sh --approved-sha ${SHA} 5'`, `coproc scripts/land.sh --approved-sha ${SHA} 5; wait`,
+    `function f { scripts/land.sh --approved-sha ${SHA} 5; }; f`, `f() { scripts/land.sh --approved-sha ${SHA} 5; }; f`,
+    `stdbuf -o0 scripts/land.sh --approved-sha ${SHA} 5`, `scripts/land.sh --approved''-sha ${SHA} 5`,
+  ]) {
+    assert.equal(runClaude(cmd).status, 2, cmd);
+  }
+});
+
+test('quote tricks and other export spellings around land.sh are blocked', () => {
+  for (const cmd of [
+    "exit(){ :; }; exec(){ :; }; declare -fx exit exec; scripts/land.sh --packet 5",
+    "set -a; exit(){ :; }; scripts/land.sh --packet 5",
+    "exit(){ :; }; export -f exit; scripts/lan''d.sh --packet 5",
+    "export BASH_E''NV=/tmp/e.sh; scripts/land.sh --packet 5",
+  ]) {
+    assert.equal(run(cmd).status, 2, cmd);
+  }
+});

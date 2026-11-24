@@ -3,10 +3,14 @@
 # either typed on the terminal or approved in a Claude Code permission prompt (--approved-sha).
 # Refuse to be sourced, then re-run under bash -p, which ignores shell functions and BASH_ENV/ENV
 # from the caller's environment: imported code could otherwise redefine builtins such as exit
-# (and so turn --packet into a merge). Code injected into this first process before line 1 is
-# outside what a script can stop; agent-guard blocks those spellings (see docs/design.md).
+# (and so turn --packet into a merge). POSIXLY_CORRECT switches this first process to POSIX
+# mode, where the exec builtin is found before any function named exec. Arbitrary code run
+# before line 1 (a BASH_ENV file) can still do anything; see docs/design.md.
 if [[ ${BASH_SOURCE[0]} != "$0" ]]; then printf 'REFUSED: run scripts/land.sh, do not source it\n' >&2; return 1; fi
-if [[ $- != *p* ]]; then exec /usr/bin/env -u BASH_ENV -u ENV /bin/bash -p -- "$0" "$@"; fi
+if [[ $- != *p* ]]; then
+  POSIXLY_CORRECT=1
+  exec /usr/bin/env -u BASH_ENV -u ENV -u POSIXLY_CORRECT /bin/bash -p -- "$0" "$@"
+fi
 set -euo pipefail
 
 DEFAULT_REPO=''   # resolved from $LAND_REPO or the primary worktree's origin URL
@@ -106,7 +110,8 @@ parse_args() {
       -h|--help) HELP=1; usage; exit 0 ;;
       --codex) CODEX=1 ;;
       --packet) [ "$MODE" = terminal ] || die "--packet and --approved-sha are exclusive"; MODE=packet ;;
-      --approved-sha) [ "$MODE" = terminal ] || die "--packet and --approved-sha are exclusive"
+      --approved-sha) [ "$MODE" != approved ] || die "--approved-sha given more than once"
+        [ "$MODE" = terminal ] || die "--packet and --approved-sha are exclusive"
         [ $# -ge 2 ] || die "--approved-sha needs the PR head SHA"; MODE=approved; APPROVED_SHA=$2; shift ;;
       --preview-checked) PREVIEW_CHECKED=1 ;;
       --repo) [ $# -ge 2 ] || die "--repo needs OWNER/NAME"; REPO=$2; shift ;;
@@ -490,6 +495,7 @@ ledger() { # event
   [[ $base == /* ]] || base=${HOME:+$HOME/.local/state}
   [[ $base == /* ]] || return 0
   dir="$base/parallel-agent-workflow"
+  [[ $dir == "$TOP" || $dir == "$TOP"/* ]] && return 0   # never inside the repository
   mkdir -p "$dir" 2>/dev/null || return 0
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REPO" "$PR" "$HEAD_SHA" "$1" \
     "$CHANGED_LINES" "$(oneline <<<"$SHADOW" | tr '\t' ' ')" 2>/dev/null >>"$dir/shadow.tsv" || true

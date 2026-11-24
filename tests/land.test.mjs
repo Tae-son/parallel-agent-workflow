@@ -1076,7 +1076,10 @@ test('imported shell functions and BASH_ENV cannot turn --packet into a merge', 
   const evil = path.join(fx.dir, 'evil.sh');
   const swallow = '[ "${1:-0}" = 0 ] || builtin exit "$@"';
   fs.writeFileSync(evil, `exit() { ${swallow}; }\n`);
-  for (const extraEnv of [{ BASH_ENV: evil }, { 'BASH_FUNC_exit%%': `() { ${swallow}\n}` }]) {
+  const evilExec = path.join(fx.dir, 'evil-exec.sh');
+  fs.writeFileSync(evilExec, `exit() { ${swallow}; }\nexec() { :; }\n`);
+  for (const extraEnv of [{ BASH_ENV: evil }, { BASH_ENV: evilExec }, { 'BASH_FUNC_exit%%': `() { ${swallow}\n}` },
+    { 'BASH_FUNC_exit%%': `() { ${swallow}\n}`, 'BASH_FUNC_exec%%': '() { :\n}' }]) {
     const r = land(fx, ['--packet', String(N)], { tty: false, extraEnv });
     assert.equal(r.status, 0, r.output);
     assert.deepEqual(r.merges, [], `${JSON.stringify(Object.keys(extraEnv))}: ${r.output}`);
@@ -1106,4 +1109,16 @@ test('the ledger never writes into the repository and never changes the outcome'
   fs.chmodSync(path.join(lockedDir, 'parallel-agent-workflow'), 0o700);
   assert.equal(r.status, 0, r.output);
   assert.doesNotMatch(r.output, /Permission denied/);
+});
+
+test('--approved-sha given twice names the real problem', () => {
+  const fx = makeFixture();
+  assertRefused(land(fx, ['--approved-sha', fx.headSha, '--approved-sha', fx.headSha, String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh' }), /given more than once/);
+});
+
+test('an XDG_STATE_HOME inside the repository is not used for the ledger', () => {
+  const fx = makeFixture();
+  const r = land(fx, ['--packet', String(N)], { tty: false, extraEnv: { XDG_STATE_HOME: fx.primary } });
+  assert.equal(r.status, 0, r.output);
+  assert.equal(fs.existsSync(path.join(fx.primary, 'parallel-agent-workflow')), false);
 });
