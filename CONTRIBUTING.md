@@ -276,6 +276,34 @@ and a preview link for UI changes. It merges only after the owner types the PR n
 terminal, plus `gate` or `preview checked` when those apply. Immediately before merging, it
 re-checks that neither the head nor `main` has moved and that the PR body is unchanged.
 
+### Approving from T3 instead of the terminal (Claude Code only)
+
+An agent in a Claude Code session can prepare the merge and ask you to approve it:
+
+```bash
+scripts/land.sh --packet 7                                   # runs every check, prints the packet, never merges
+scripts/land.sh --approved-sha <head-sha> [--preview-checked] 7
+```
+
+The agent posts the packet, then runs the exact `--approved-sha` command the packet printed.
+The ask rule `Bash(scripts/land.sh --approved-sha *)` in `.claude/settings.json` makes Claude
+Code show that command as a permission prompt in every permission mode, so it appears in T3
+on your phone or Mac. Approving it is your confirmation: the command names the exact head
+commit, and `--preview-checked` (required for UI changes) states that you checked the
+preview. `land.sh` then runs every check again and merges only that commit. It refuses
+outside Claude Code (`CLAUDECODE=1`), refuses gate-file changes (merge those from a
+terminal), and refuses `--codex` and `--repo`. `agent-guard` lets through only that exact
+spelling, because another spelling might not match the ask rule; Codex and Hermes never get
+the exception. This defends against agent mistakes, not against a hijacked agent: an agent
+using the owner's GitHub token can still merge through the API. See `docs/design.md`.
+
+Every packet also prints a **shadow auto-merge** verdict, `WOULD MERGE` or `WOULD HOLD:
+<reasons>`, and every packet or merge appends a row to
+`~/.local/state/parallel-agent-workflow/shadow.tsv`. A PR would merge only with no gate or
+risky files, every path listed in the optional `scripts/auto-merge-paths.txt` on `main`, at
+most 150 changed lines, and a preview for UI changes. Nothing acts on the verdict; it builds
+the record for deciding later whether any change may merge without you.
+
 Two limits matter:
 
 - The gate protects only merges that go through it. Without branch protection, GitHub does

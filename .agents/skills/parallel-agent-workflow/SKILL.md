@@ -117,7 +117,9 @@ Fixture results do not prove native activation.
   paths, or two fix/retest rounds leave blockers. Report the blocker to the owner, not PASS.
 - **Output:** a verified PR with independent PASS evidence and honest current CI status.
 - **Then stop.** The owner accepts the evidence and runs `scripts/land.sh`; agents never
-  merge. Declared session IDs are not authentication, and green CI alone is not QA.
+  merge on their own. When the owner asks a Claude Code session to land the PR, run
+  `scripts/land.sh --packet <PR#>`, post the packet, then run the exact `--approved-sha`
+  command it prints so the owner approves it in the permission prompt. Declared session IDs are not authentication, and green CI alone is not QA.
 
 If this skill did not load on its own, invoke it by name (`/parallel-agent-workflow` in
 Claude Code).

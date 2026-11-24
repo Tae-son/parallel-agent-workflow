@@ -4,8 +4,9 @@
 // GUARDRAIL, NOT A SECURITY BOUNDARY. It stops accidental and ordinary attempts by
 // parallel agents to push to main, force-push, merge pull requests, approve pull
 // requests (`gh pr review --approve`; `--comment` and `--request-changes` stay
-// allowed), write through `gh api`, run the owner-only scripts/land.sh, run the codex
-// CLI or scripts/codex-review.sh, or commit/merge/rebase/cherry-pick/revert/am/pull
+// allowed), write through `gh api`, run the owner-only scripts/land.sh (except its
+// read-only --packet mode and, for Claude Code only, the one exact --approved-sha form
+// described below), run the codex CLI or scripts/codex-review.sh, or commit/merge/rebase/cherry-pick/revert/am/pull
 // (without --ff-only)/reset --hard while on main. Hooks still run in
 // bypass-permissions mode, which is why this is a hook and not a deny rule.
 // A determined process can evade it. Known gaps: command words built at run time
@@ -16,6 +17,14 @@
 // abbreviated value options (`--rep`) or remote push refspec config. The git pre-push hook
 // (.githooks/pre-push) is a second layer for main pushes.
 //
+// Owner approval in Claude Code: when this hook runs with --claude-ask-rule (only
+// .claude/settings.json passes it, next to the ask rule Bash(scripts/land.sh --approved-sha *)),
+// a command that is exactly `scripts/land.sh --approved-sha <40-hex> [--preview-checked] <PR#>`
+// is let through, because that ask rule makes Claude Code prompt the owner for it in every
+// permission mode. Any other spelling (a path prefix, a wrapper, `bash`, a compound command)
+// might not match the ask rule, so it stays blocked. Codex and Hermes call this hook without
+// the flag and never get the exception.
+//
 // Protocol: JSON on stdin {tool_name, tool_input: {command}, cwd}. To block, print
 // one line to stderr and exit 2. Otherwise exit 0. Unparseable input or no
 // command exits 0 so unrelated tools keep working.
@@ -24,7 +33,10 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-const OWNER_MERGE = 'merging is owner-only; leave the PR open and ask the owner to run scripts/land.sh <PR#> in their own terminal';
+const OWNER_MERGE = 'merging is owner-only; run scripts/land.sh --packet <PR#> to show the owner the review packet, then either ask for approval with the exact --approved-sha command it prints (Claude Code only) or ask the owner to run scripts/land.sh <PR#> in their own terminal';
+const CLAUDE_ASK_RULE = process.argv.includes('--claude-ask-rule');
+const APPROVED_FORM = /^scripts\/land\.sh --approved-sha [0-9a-f]{40}( --preview-checked)? [1-9][0-9]*$/;
+const PACKET_ARGS = (args) => args.length === 2 && args[0] === '--packet' && /^[1-9][0-9]*$/.test(args[1]);
 const PUSH_MAIN = 'pushing to main is owner-only; push your feature branch (git push -u origin <branch>) and open a PR';
 const FORCE = 'force-push blocked; push a new commit instead, or use --force-with-lease on your own feature branch';
 const APPROVE = 'gh pr review --approve blocked: approvals are owner-only; QA records its verdict in the independent-qa block of the PR body instead (--comment and --request-changes stay allowed)';
@@ -153,7 +165,7 @@ function checkSimple(words, ctx) {
 
 function scriptReason(p, args = []) {
   const b = base(p);
-  if (b === 'land.sh') return `running land.sh blocked: ${OWNER_MERGE}`;
+  if (b === 'land.sh') return PACKET_ARGS(args) ? null : `running land.sh blocked: ${OWNER_MERGE}`;
   if (b === 'codex' || b === 'codex-review.sh') return CODEX;
   if (b === 'codex-smoke.sh' && !args.includes('--owner-approved')) {
     return 'Codex smoke runner requires explicit owner approval and declared isolation boundaries; use scripts/codex-smoke.sh --owner-approved only after the owner approves this exact test';
@@ -303,6 +315,9 @@ let input;
 try { input = JSON.parse(readFileSync(0, 'utf8')); } catch { process.exit(0); }
 const command = input?.tool_input?.command;
 if ((input?.tool_name && input.tool_name !== 'Bash') || typeof command !== 'string' || !command.trim()) process.exit(0);
+
+// The approved form is matched on the whole command string, before any parsing.
+if (CLAUDE_ASK_RULE && APPROVED_FORM.test(command)) process.exit(0);
 
 let reason;
 try {

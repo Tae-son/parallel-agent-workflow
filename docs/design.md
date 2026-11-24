@@ -225,3 +225,28 @@ project-specific and are not included here.
 - `install.sh` merges the Claude hook into an existing `.claude/settings.json` by parsing and
   re-serialising it: formatting, duplicate keys and numbers beyond double precision are not
   preserved. It keeps the file's mode.
+
+## Owner approval in a permission prompt
+
+`scripts/land.sh --approved-sha` replaces the terminal confirmation with a Claude Code
+permission prompt. The prompt is raised by Claude Code itself, not by the model: an explicit
+`ask` rule prompts in every permission mode, including `bypassPermissions`, and a project's
+committed `ask` rules apply without a trust step (code.claude.com/docs/en/permission-modes,
+code.claude.com/docs/en/settings, read 2026-11-24). What the owner approves is the whole
+command line, so it carries everything the decision covers: the exact head SHA and, for UI
+changes, `--preview-checked`.
+
+Limits, in order of importance:
+
+- **Mistakes, not attacks.** An ask rule matches command spellings, not the program. Agents
+  here use the owner's own GitHub token, so a hijacked agent can merge through the API
+  without this script; `agent-guard` and `CLAUDECODE=1` are guardrails. Stopping a hostile
+  agent needs a credential the agent machine does not hold (a bot identity for agents,
+  owner approval in GitHub, and rulesets that bind admins), which is a separate change.
+- **Spelling.** `agent-guard` allows only `scripts/land.sh --approved-sha <40-hex>
+  [--preview-checked] <PR#>` as the whole command, because forms such as `bash scripts/land.sh`
+  or an absolute path would not match the ask rule and would run unprompted.
+- **Projects without the kit.** A Claude session whose project lacks this `.claude/settings.json`
+  has neither the ask rule nor the guard. Add the same ask rule to the user settings
+  (`~/.claude/settings.json`) to keep the prompt in every project.
+- **Gate files** still need the terminal, because their full diffs are part of the decision.

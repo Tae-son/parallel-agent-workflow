@@ -14,7 +14,7 @@ installed hooks from active guards and documents the runtime-specific gaps.
 
 | Piece | What it does |
 | --- | --- |
-| `scripts/land.sh` | The merge gate. Verifies a pull request against GitHub's `main` (CI green on the exact head commit, up to date, no symlinks or submodules), prints a review packet (paths outside the declared scope, gate-file diffs in full, preview link for UI changes), and squash-merges only after the owner types the PR number at the terminal. Re-checks that nothing moved immediately before merging. Refuses to run unless it is byte-identical to the copy on GitHub's `main`. |
+| `scripts/land.sh` | The merge gate. Verifies a pull request against GitHub's `main` (CI green on the exact head commit, up to date, no symlinks or submodules), prints a review packet (paths outside the declared scope, gate-file diffs in full, preview link for UI changes), and squash-merges only after the owner confirms: typed at the terminal, or (Claude Code only) by approving the exact `--approved-sha` command in a permission prompt, for example in T3 on a phone. `--packet` prints the packet without merging. Every packet records a shadow auto-merge verdict. Re-checks that nothing moved immediately before merging. Refuses to run unless it is byte-identical to the copy on GitHub's `main`. |
 | `scripts/agents-status.sh` | Read-only overview of every Git worktree: branch, age, ahead/behind, dirty and untracked paths, PR state, path overlaps between agents, and the work-in-progress limit. Agents run it before starting. |
 | `.claude/hooks/agent-guard.mjs` | Claude Code `PreToolUse` hook that blocks the common forms of pushing to `main`, force-pushing, merging, approving pull requests (`gh pr review --approve`; commenting and requesting changes stay allowed), writing through `gh api`, and running the owner-only scripts, even inside `bash -c`, `$(...)`, `sudo`, `timeout`, and friends. |
 | `.codex/hooks.json` | Codex native synchronous Bash pre-tool registration using the same checker. Requires owner-reviewed project/hook trust; does not intercept later stdin or fix missing per-command working-directory metadata. |
@@ -80,6 +80,8 @@ owner writes a brief (scope + Allowed paths)
   -> separate QA session tests the brief and records evidence on the exact head
        FAIL/BLOCKED -> builder fixes, verifies and pushes -> QA retests the new head
   -> owner runs scripts/land.sh <PR#> in their own terminal
+     (or, Claude Code only: agent runs scripts/land.sh --packet <PR#>, posts it, then runs the
+      printed --approved-sha command; the owner approves that permission prompt in T3)
        refuses unless CI green, independent QA PASS, up to date, no symlinks/submodules
        prints: in-scope, OUT-OF-SCOPE, gate files (full diff), UI files, preview
        optional --codex: advisory second opinion, each payload approved before sending

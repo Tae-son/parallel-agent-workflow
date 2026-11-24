@@ -1,4 +1,9 @@
 {
+  "permissions": {
+    "ask": [
+      "Bash(scripts/land.sh --approved-sha *)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
@@ -6,7 +11,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-guard.mjs\""
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/agent-guard.mjs\" --claude-ask-rule"
           }
         ]
       }
