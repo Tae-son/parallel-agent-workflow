@@ -250,3 +250,13 @@ Limits, in order of importance:
   has neither the ask rule nor the guard. Add the same ask rule to the user settings
   (`~/.claude/settings.json`) to keep the prompt in every project.
 - **Gate files** still need the terminal, because their full diffs are part of the decision.
+- **Injected shell code.** `land.sh` re-runs itself under `bash -p`, so exported functions and
+  `BASH_ENV`/`ENV` cannot redefine builtins such as `exit` (which would let `--packet` reach the
+  merge), and it refuses to be sourced. Code injected into the first process before line 1
+  runs anyway; `agent-guard` blocks the `BASH_ENV=`, `ENV=` and `export -f` spellings.
+- **Links and copies.** `--approved-sha` runs only when invoked as `scripts/land.sh` from the
+  primary worktree, because a link under another name passes neither the guard's name match
+  nor the ask rule.
+- **Existing settings.** `install.sh` adds `--claude-ask-rule` and the ask rule together when it
+  registers the guard, and leaves an existing registration alone, so a repository keeps
+  terminal-only merging until both are present.

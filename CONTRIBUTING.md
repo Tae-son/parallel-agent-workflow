@@ -299,7 +299,7 @@ using the owner's GitHub token can still merge through the API. See `docs/design
 
 Every packet also prints a **shadow auto-merge** verdict, `WOULD MERGE` or `WOULD HOLD:
 <reasons>`, and every packet or merge appends a row to
-`~/.local/state/parallel-agent-workflow/shadow.tsv`. A PR would merge only with no gate or
+`$XDG_STATE_HOME/parallel-agent-workflow/shadow.tsv` (default `~/.local/state`). A PR would merge only with no gate or
 risky files, every path listed in the optional `scripts/auto-merge-paths.txt` on `main`, at
 most 150 changed lines, and a preview for UI changes. Nothing acts on the verdict; it builds
 the record for deciding later whether any change may merge without you.

@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 # Owner-only merge gate: verify a PR, print a review packet, squash-merge after the owner confirms,
 # either typed on the terminal or approved in a Claude Code permission prompt (--approved-sha).
+# Refuse to be sourced, then re-run under bash -p, which ignores shell functions and BASH_ENV/ENV
+# from the caller's environment: imported code could otherwise redefine builtins such as exit
+# (and so turn --packet into a merge). Code injected into this first process before line 1 is
+# outside what a script can stop; agent-guard blocks those spellings (see docs/design.md).
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then printf 'REFUSED: run scripts/land.sh, do not source it\n' >&2; return 1; fi
+if [[ $- != *p* ]]; then exec /usr/bin/env -u BASH_ENV -u ENV /bin/bash -p -- "$0" "$@"; fi
 set -euo pipefail
 
 DEFAULT_REPO=''   # resolved from $LAND_REPO or the primary worktree's origin URL
@@ -477,11 +483,16 @@ shadow_verdict() {
 }
 
 # One TSV row per outcome, kept outside the repository so the shadow record survives checkouts.
+# $XDG_STATE_HOME if absolute (the XDG spec ignores relative values), else ~/.local/state;
+# no usable base means no row. A ledger failure never changes the outcome.
 ledger() { # event
-  local dir="${XDG_STATE_HOME:-$HOME/.local/state}/parallel-agent-workflow"
+  local base=${XDG_STATE_HOME:-} dir
+  [[ $base == /* ]] || base=${HOME:+$HOME/.local/state}
+  [[ $base == /* ]] || return 0
+  dir="$base/parallel-agent-workflow"
   mkdir -p "$dir" 2>/dev/null || return 0
   printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REPO" "$PR" "$HEAD_SHA" "$1" \
-    "$CHANGED_LINES" "$(oneline <<<"$SHADOW" | tr '\t' ' ')" >>"$dir/shadow.tsv" 2>/dev/null || true
+    "$CHANGED_LINES" "$(oneline <<<"$SHADOW" | tr '\t' ' ')" 2>/dev/null >>"$dir/shadow.tsv" || true
 }
 
 group() {
@@ -538,6 +549,14 @@ confirm() {
   if [ "$UI" = 1 ]; then ask "UI changed. Check the preview, then type 'preview checked': " 'preview checked'; fi
 }
 
+# The ask rule and agent-guard both key on the literal spelling scripts/land.sh run from the
+# primary worktree, so --approved-sha runs only under that name there (not via a link or copy).
+check_invocation() {
+  [ "$MODE" = approved ] || return 0
+  [ "$0" = scripts/land.sh ] && [ "$(pwd -P)" = "$TOP" ] \
+    || die "--approved-sha must be run as scripts/land.sh from $TOP, the exact spelling the owner's permission prompt covers"
+}
+
 # --approved-sha: the owner approved this exact command line in the permission prompt.
 approved() {
   [ "$APPROVED_SHA" = "$HEAD_SHA" ] || die "approved SHA $APPROVED_SHA is not the PR head $HEAD_SHA; get a fresh packet and approval"
@@ -587,6 +606,7 @@ main() {
   set -f            # PR-supplied globs must never expand against the filesystem
   TMP=$(mktemp -d)
   locate_self
+  check_invocation
   check_local_config
   resolve_repo
   check_self

@@ -15,7 +15,7 @@ export PATH
 # generated fixture hook registration bytes, the kit guard script bytes, and the
 # v0.165 hook identity hash recorded in the disposable trust artifact.
 fixture_hooks_sha256=e36be1913a9bec5a42d33331074112d1acd5aab776c62272a5bdb714116a184f
-guard_sha256=9fed1bfce718a643cfdb198e1e3e02b5496921d315ff6c80cd841ce0cd0031b7
+guard_sha256=3341028246ee4151f5179cd72ce2207bc94d1994d6d7d67d4eed206c7df2bce5
 trusted_hash=sha256:35cc601ac77904656ed3a63b039bb5332760eebb6dd2ea715f29e7a74a6739bd
 
 usage() {

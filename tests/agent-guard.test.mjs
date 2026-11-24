@@ -338,3 +338,15 @@ test('other spellings of --approved-sha stay blocked, even for Claude Code', () 
     assert.equal(runClaude(cmd).status, 2, JSON.stringify(cmd));
   }
 });
+
+test('sourcing land.sh or injecting a shell environment into it is blocked', () => {
+  for (const cmd of [
+    'source scripts/land.sh --packet 5', '. scripts/land.sh --packet 5',
+    'BASH_ENV=/tmp/e.sh scripts/land.sh --packet 5', 'ENV=/tmp/e.sh bash scripts/land.sh --packet 5',
+    'exit() { :; }; export -f exit; scripts/land.sh --packet 5',
+    `BASH_ENV=/tmp/e scripts/land.sh --approved-sha ${SHA} 5`,
+  ]) {
+    assert.equal(run(cmd).status, 2, cmd);
+    assert.equal(runClaude(cmd).status, 2, cmd);
+  }
+});

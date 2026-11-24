@@ -13,7 +13,8 @@
 // (`$(echo gh) pr merge 5`, `$CMD push`), git/gh aliases, scripts written to disk
 // and then run, commands piped into a bare `bash`, `find -exec`, other languages'
 // subprocess APIs, raw curl to the GitHub API, and branch switches earlier in the
-// same command (`git switch main && git commit`), and push destinations hidden by
+// same command (`git switch main && git commit`), a link or copy of land.sh under another
+// name (land.sh itself then refuses --approved-sha), and push destinations hidden by
 // abbreviated value options (`--rep`) or remote push refspec config. The git pre-push hook
 // (.githooks/pre-push) is a second layer for main pushes.
 //
@@ -156,7 +157,10 @@ function checkSimple(words, ctx) {
   const script = scriptReason(cmd, args);
   if (script) return script;
   if (SHELLS.has(b)) return checkShell(args, ctx);
-  if (b === 'source' || b === '.') return args[0] ? scriptReason(args[0], args.slice(1)) : null;
+  if (b === 'source' || b === '.') {
+    if (args[0] && base(args[0]) === 'land.sh') return `sourcing land.sh blocked: ${OWNER_MERGE}`;
+    return args[0] ? scriptReason(args[0], args.slice(1)) : null;
+  }
   if (b === 'eval') return check(args.join(' '), ctx);
   if (b === 'git') return checkGit(args, ctx);
   if (b === 'gh') return checkGh(args);
@@ -315,6 +319,12 @@ let input;
 try { input = JSON.parse(readFileSync(0, 'utf8')); } catch { process.exit(0); }
 const command = input?.tool_input?.command;
 if ((input?.tool_name && input.tool_name !== 'Bash') || typeof command !== 'string' || !command.trim()) process.exit(0);
+
+// Shell code injected into land.sh's environment could redefine its builtins; refuse it.
+if (/land\.sh/.test(command) && /\b(?:BASH_ENV|ENV|SHELLOPTS|BASHOPTS)=|\bexport\b[^;&|\n]*\s-f\b|BASH_FUNC_/.test(command)) {
+  process.stderr.write(`agent-guard: land.sh with an injected shell environment (BASH_ENV, ENV, exported functions) blocked: ${OWNER_MERGE}\n`);
+  process.exit(2);
+}
 
 // The approved form is matched on the whole command string, before any parsing.
 if (CLAUDE_ASK_RULE && APPROVED_FORM.test(command)) process.exit(0);
