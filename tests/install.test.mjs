@@ -258,10 +258,12 @@ test('an existing .claude/settings.json keeps its hooks and gains the agent-guar
   fs.writeFileSync(path.join(target, '.claude/settings.json'), JSON.stringify(existing));
   assert.equal(install(['--owner', 'someone', target]).status, 0);
   const merged = JSON.parse(fs.readFileSync(path.join(target, '.claude/settings.json'), 'utf8'));
-  assert.deepEqual(merged.permissions, existing.permissions);
   assert.equal(merged.hooks.PreToolUse[0].hooks[0].command, 'echo keep');
   assert.equal(merged.hooks.PreToolUse[1].matcher, 'Bash');
   assert.match(merged.hooks.PreToolUse[1].hooks[0].command, /agent-guard\.mjs/);
+  // The guard flag and the ask rule arrive together; existing permissions are kept.
+  assert.match(merged.hooks.PreToolUse[1].hooks[0].command, /agent-guard\.mjs" --claude-ask-rule$/);
+  assert.deepEqual(merged.permissions, { allow: ['Bash(npm test)'], ask: ['Bash(scripts/land.sh --approved-sha *)'] });
   const r = install(['--owner', 'someone', target]);
   assert.match(r.stdout, /hook already registered/);
   assert.doesNotMatch(r.stdout, /Overwritten/);
@@ -822,7 +824,7 @@ test('a whitespace-only or BOM-prefixed settings file is handled', () => {
   const r2 = install(['--owner', 'someone', bom]);
   assert.equal(r2.status, 0, text(r2));
   const merged = JSON.parse(fs.readFileSync(path.join(bom, '.claude/settings.json'), 'utf8'));
-  assert.deepEqual(merged.permissions, { allow: [] });
+  assert.deepEqual(merged.permissions, { allow: [], ask: ['Bash(scripts/land.sh --approved-sha *)'] });
   assert.match(merged.hooks.PreToolUse[0].hooks[0].command, /agent-guard/);
 });
 

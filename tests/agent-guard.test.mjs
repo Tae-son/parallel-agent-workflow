@@ -32,10 +32,12 @@ function makeRepo(dir, branch) {
   if (branch !== 'main') git(dir, 'switch', '-qc', branch);
 }
 
-function runHook(stdin) {
-  return spawnSync('node', [hook], { input: stdin, encoding: 'utf8', env });
+function runHook(stdin, flags = []) {
+  return spawnSync('node', [hook, ...flags], { input: stdin, encoding: 'utf8', env });
 }
 const run = (command, cwd = featRepo) => runHook(JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }));
+const runClaude = (command, cwd = featRepo) =>
+  runHook(JSON.stringify({ tool_name: 'Bash', tool_input: { command }, cwd }), ['--claude-ask-rule']);
 
 before(() => {
   tmp = mkdtempSync(path.join(tmpdir(), 'agent-guard-'));
@@ -296,4 +298,78 @@ test('non-JSON, empty, commandless and non-Bash input exit 0', () => {
 test('missing cwd falls back to process cwd and still evaluates', () => {
   const r = runHook(JSON.stringify({ tool_input: { command: 'gh pr merge 5' } }));
   assert.equal(r.status, 2);
+});
+
+const SHA = 'a'.repeat(40);
+test('land.sh --packet <PR#> is read-only and allowed for every runtime', () => {
+  for (const cmd of ['scripts/land.sh --packet 5', './scripts/land.sh --packet 12', 'bash scripts/land.sh --packet 5']) {
+    assert.equal(run(cmd).status, 0, cmd);
+    assert.equal(runClaude(cmd).status, 0, cmd);
+  }
+  for (const cmd of ['scripts/land.sh --packet 5 --codex', 'scripts/land.sh --packet', 'scripts/land.sh --packet 5 6',
+    'scripts/land.sh 5 --packet', `scripts/land.sh --packet --approved-sha ${SHA} 5`]) {
+    assert.equal(run(cmd).status, 2, cmd);
+  }
+});
+
+test('the exact --approved-sha form passes only with --claude-ask-rule', () => {
+  for (const cmd of [`scripts/land.sh --approved-sha ${SHA} 5`, `scripts/land.sh --approved-sha ${SHA} --preview-checked 5`]) {
+    assert.equal(runClaude(cmd).status, 0, cmd);
+    assert.equal(run(cmd).status, 2, `${cmd} without the flag (Codex, Hermes)`);
+  }
+});
+
+test('other spellings of --approved-sha stay blocked, even for Claude Code', () => {
+  for (const cmd of [
+    `./scripts/land.sh --approved-sha ${SHA} 5`,
+    `/home/me/repo/scripts/land.sh --approved-sha ${SHA} 5`,
+    `bash scripts/land.sh --approved-sha ${SHA} 5`,
+    `env X=1 scripts/land.sh --approved-sha ${SHA} 5`,
+    `cd /tmp && scripts/land.sh --approved-sha ${SHA} 5`,
+    `scripts/land.sh --approved-sha ${SHA} 5; gh pr merge 6`,
+    ` scripts/land.sh --approved-sha ${SHA} 5`,
+    `scripts/land.sh --approved-sha ${SHA} 5\n`,
+    `scripts/land.sh --approved-sha ${SHA.slice(0, 12)} 5`,
+    `scripts/land.sh --approved-sha ${SHA} --codex 5`,
+    `scripts/land.sh --approved-sha ${SHA} --repo o/r 5`,
+    `eval "scripts/land.sh --approved-sha ${SHA} 5"`,
+    `bash -c 'scripts/land.sh --approved-sha ${SHA} 5'`,
+  ]) {
+    assert.equal(runClaude(cmd).status, 2, JSON.stringify(cmd));
+  }
+});
+
+test('sourcing land.sh or injecting a shell environment into it is blocked', () => {
+  for (const cmd of [
+    'source scripts/land.sh --packet 5', '. scripts/land.sh --packet 5',
+    'BASH_ENV=/tmp/e.sh scripts/land.sh --packet 5', 'ENV=/tmp/e.sh bash scripts/land.sh --packet 5',
+    'exit() { :; }; export -f exit; scripts/land.sh --packet 5',
+    `BASH_ENV=/tmp/e scripts/land.sh --approved-sha ${SHA} 5`,
+  ]) {
+    assert.equal(run(cmd).status, 2, cmd);
+    assert.equal(runClaude(cmd).status, 2, cmd);
+  }
+});
+
+test('--approved-sha inside any wrapper, function or quoting trick is blocked, even for Claude Code', () => {
+  for (const cmd of [
+    `setsid -w scripts/land.sh --approved-sha ${SHA} 5`, `ionice -c3 scripts/land.sh --approved-sha ${SHA} 5`,
+    `flock /tmp/x scripts/land.sh --approved-sha ${SHA} 5`, `taskset -c 0 scripts/land.sh --approved-sha ${SHA} 5`,
+    `env -S 'scripts/land.sh --approved-sha ${SHA} 5'`, `coproc scripts/land.sh --approved-sha ${SHA} 5; wait`,
+    `function f { scripts/land.sh --approved-sha ${SHA} 5; }; f`, `f() { scripts/land.sh --approved-sha ${SHA} 5; }; f`,
+    `stdbuf -o0 scripts/land.sh --approved-sha ${SHA} 5`, `scripts/land.sh --approved''-sha ${SHA} 5`,
+  ]) {
+    assert.equal(runClaude(cmd).status, 2, cmd);
+  }
+});
+
+test('quote tricks and other export spellings around land.sh are blocked', () => {
+  for (const cmd of [
+    "exit(){ :; }; exec(){ :; }; declare -fx exit exec; scripts/land.sh --packet 5",
+    "set -a; exit(){ :; }; scripts/land.sh --packet 5",
+    "exit(){ :; }; export -f exit; scripts/lan''d.sh --packet 5",
+    "export BASH_E''NV=/tmp/e.sh; scripts/land.sh --packet 5",
+  ]) {
+    assert.equal(run(cmd).status, 2, cmd);
+  }
 });

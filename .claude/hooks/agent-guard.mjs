@@ -4,17 +4,27 @@
 // GUARDRAIL, NOT A SECURITY BOUNDARY. It stops accidental and ordinary attempts by
 // parallel agents to push to main, force-push, merge pull requests, approve pull
 // requests (`gh pr review --approve`; `--comment` and `--request-changes` stay
-// allowed), write through `gh api`, run the owner-only scripts/land.sh, run the codex
-// CLI or scripts/codex-review.sh, or commit/merge/rebase/cherry-pick/revert/am/pull
+// allowed), write through `gh api`, run the owner-only scripts/land.sh (except its
+// read-only --packet mode and, for Claude Code only, the one exact --approved-sha form
+// described below), run the codex CLI or scripts/codex-review.sh, or commit/merge/rebase/cherry-pick/revert/am/pull
 // (without --ff-only)/reset --hard while on main. Hooks still run in
 // bypass-permissions mode, which is why this is a hook and not a deny rule.
 // A determined process can evade it. Known gaps: command words built at run time
 // (`$(echo gh) pr merge 5`, `$CMD push`), git/gh aliases, scripts written to disk
 // and then run, commands piped into a bare `bash`, `find -exec`, other languages'
 // subprocess APIs, raw curl to the GitHub API, and branch switches earlier in the
-// same command (`git switch main && git commit`), and push destinations hidden by
+// same command (`git switch main && git commit`), a link or copy of land.sh under another
+// name (land.sh itself then refuses --approved-sha), and push destinations hidden by
 // abbreviated value options (`--rep`) or remote push refspec config. The git pre-push hook
 // (.githooks/pre-push) is a second layer for main pushes.
+//
+// Owner approval in Claude Code: when this hook runs with --claude-ask-rule (only
+// .claude/settings.json passes it, next to the ask rule Bash(scripts/land.sh --approved-sha *)),
+// a command that is exactly `scripts/land.sh --approved-sha <40-hex> [--preview-checked] <PR#>`
+// is let through, because that ask rule makes Claude Code prompt the owner for it in every
+// permission mode. Any other spelling (a path prefix, a wrapper, `bash`, a compound command)
+// might not match the ask rule, so it stays blocked. Codex and Hermes call this hook without
+// the flag and never get the exception.
 //
 // Protocol: JSON on stdin {tool_name, tool_input: {command}, cwd}. To block, print
 // one line to stderr and exit 2. Otherwise exit 0. Unparseable input or no
@@ -24,7 +34,10 @@ import { spawnSync } from 'node:child_process';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-const OWNER_MERGE = 'merging is owner-only; leave the PR open and ask the owner to run scripts/land.sh <PR#> in their own terminal';
+const OWNER_MERGE = 'merging is owner-only; run scripts/land.sh --packet <PR#> to show the owner the review packet, then either ask for approval with the exact --approved-sha command it prints (Claude Code only) or ask the owner to run scripts/land.sh <PR#> in their own terminal';
+const CLAUDE_ASK_RULE = process.argv.includes('--claude-ask-rule');
+const APPROVED_FORM = /^scripts\/land\.sh --approved-sha [0-9a-f]{40}( --preview-checked)? [1-9][0-9]*$/;
+const PACKET_ARGS = (args) => args.length === 2 && args[0] === '--packet' && /^[1-9][0-9]*$/.test(args[1]);
 const PUSH_MAIN = 'pushing to main is owner-only; push your feature branch (git push -u origin <branch>) and open a PR';
 const FORCE = 'force-push blocked; push a new commit instead, or use --force-with-lease on your own feature branch';
 const APPROVE = 'gh pr review --approve blocked: approvals are owner-only; QA records its verdict in the independent-qa block of the PR body instead (--comment and --request-changes stay allowed)';
@@ -144,7 +157,10 @@ function checkSimple(words, ctx) {
   const script = scriptReason(cmd, args);
   if (script) return script;
   if (SHELLS.has(b)) return checkShell(args, ctx);
-  if (b === 'source' || b === '.') return args[0] ? scriptReason(args[0], args.slice(1)) : null;
+  if (b === 'source' || b === '.') {
+    if (args[0] && base(args[0]) === 'land.sh') return `sourcing land.sh blocked: ${OWNER_MERGE}`;
+    return args[0] ? scriptReason(args[0], args.slice(1)) : null;
+  }
   if (b === 'eval') return check(args.join(' '), ctx);
   if (b === 'git') return checkGit(args, ctx);
   if (b === 'gh') return checkGh(args);
@@ -153,7 +169,7 @@ function checkSimple(words, ctx) {
 
 function scriptReason(p, args = []) {
   const b = base(p);
-  if (b === 'land.sh') return `running land.sh blocked: ${OWNER_MERGE}`;
+  if (b === 'land.sh') return PACKET_ARGS(args) ? null : `running land.sh blocked: ${OWNER_MERGE}`;
   if (b === 'codex' || b === 'codex-review.sh') return CODEX;
   if (b === 'codex-smoke.sh' && !args.includes('--owner-approved')) {
     return 'Codex smoke runner requires explicit owner approval and declared isolation boundaries; use scripts/codex-smoke.sh --owner-approved only after the owner approves this exact test';
@@ -303,6 +319,27 @@ let input;
 try { input = JSON.parse(readFileSync(0, 'utf8')); } catch { process.exit(0); }
 const command = input?.tool_input?.command;
 if ((input?.tool_name && input.tool_name !== 'Bash') || typeof command !== 'string' || !command.trim()) process.exit(0);
+
+// The approved form is matched on the whole command string, before any parsing.
+if (CLAUDE_ASK_RULE && APPROVED_FORM.test(command)) process.exit(0);
+
+// Any other command carrying --approved-sha is refused, whatever runs it (setsid, flock,
+// env -S, coproc, a function, ...): only the whole-command form above matches the ask rule.
+// Words are read after quote removal, so 'land''.sh' and BASH_E''NV count too.
+{
+  const cmds = [];
+  try { scan(command, 0, null, cmds); } catch { /* the main check below reports it */ }
+  const words = cmds.flat();
+  if (words.some((w) => w.includes('--approved-sha'))) {
+    process.stderr.write(`agent-guard: land.sh --approved-sha must be the whole command, exactly as --packet printed it (Claude Code only): ${OWNER_MERGE}\n`);
+    process.exit(2);
+  }
+  const text = words.join(' ');
+  if (/land\.sh/.test(text) && /\b(?:BASH_ENV|ENV|SHELLOPTS|BASHOPTS|POSIXLY_CORRECT)=|\b(?:export|declare|typeset)\b[^;&|\n]*\s-(?:f|fx|xf)\b|\bset\s+-a\b|\bset\s+-o\s+allexport\b|BASH_FUNC_/.test(text)) {
+    process.stderr.write(`agent-guard: land.sh with an injected shell environment (BASH_ENV, ENV, exported functions) blocked: ${OWNER_MERGE}\n`);
+    process.exit(2);
+  }
+}
 
 let reason;
 try {

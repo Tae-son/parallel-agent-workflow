@@ -225,3 +225,45 @@ project-specific and are not included here.
 - `install.sh` merges the Claude hook into an existing `.claude/settings.json` by parsing and
   re-serialising it: formatting, duplicate keys and numbers beyond double precision are not
   preserved. It keeps the file's mode.
+
+## Owner approval in a permission prompt
+
+`scripts/land.sh --approved-sha` replaces the terminal confirmation with a Claude Code
+permission prompt. The prompt is raised by Claude Code itself, not by the model: an explicit
+`ask` rule prompts in every permission mode, including `bypassPermissions` (in `dontAsk` mode
+it denies instead, which also never merges), and a project's
+committed `ask` rules apply without a trust step (code.claude.com/docs/en/permission-modes,
+code.claude.com/docs/en/settings, read 2026-11-24). What the owner approves is the whole
+command line, so it carries everything the decision covers: the exact head SHA and, for UI
+changes, `--preview-checked`.
+
+Limits, in order of importance:
+
+- **Mistakes, not attacks.** An ask rule matches command spellings, not the program. Agents
+  here use the owner's own GitHub token, so a hijacked agent can merge through the API
+  without this script; `agent-guard` and `CLAUDECODE=1` are guardrails. Stopping a hostile
+  agent needs a credential the agent machine does not hold (a bot identity for agents,
+  owner approval in GitHub, and rulesets that bind admins), which is a separate change.
+- **Spelling.** `agent-guard` allows only `scripts/land.sh --approved-sha <40-hex>
+  [--preview-checked] <PR#>` as the whole command, because forms such as `bash scripts/land.sh`
+  or an absolute path would not match the ask rule and would run unprompted.
+- **Projects without the kit.** A Claude session whose project lacks this `.claude/settings.json`
+  has neither the ask rule nor the guard. Add the same ask rule to the user settings
+  (`~/.claude/settings.json`) to keep the prompt in every project.
+- **Gate files** still need the terminal, because their full diffs are part of the decision.
+- **Injected shell code.** `land.sh` refuses to be sourced and re-runs itself under `bash -p`
+  (entering POSIX mode first, so the `exec` builtin beats a function named `exec`); the re-run
+  ignores exported functions and `BASH_ENV`/`ENV`, so they cannot redefine `exit` and let
+  `--packet` reach the merge. A `BASH_ENV` file still runs as code in the first process, and
+  code can merge directly (as in the guard's known gaps), so this is hardening against
+  accidents, not a boundary. `agent-guard` blocks the usual spellings (`BASH_ENV=`, `ENV=`,
+  `export -f`, `declare -fx`, `set -a`) after quote removal.
+- **Wrappers.** Any command containing an `--approved-sha` word other than the exact whole
+  command is blocked (`setsid`, `flock`, `env -S`, `coproc`, a shell function, ...), because
+  the ask rule may not see through them in `bypassPermissions` mode.
+- **Links and copies.** `--approved-sha` runs only when invoked as `scripts/land.sh` from the
+  primary worktree, because a link under another name passes neither the guard's name match
+  nor the ask rule.
+- **Existing settings.** `install.sh` adds `--claude-ask-rule` and the ask rule together when it
+  registers the guard, and leaves an existing registration alone, so a repository keeps
+  terminal-only merging until both are present.

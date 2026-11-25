@@ -1,5 +1,16 @@
 #!/usr/bin/env bash
-# Owner-only merge gate: verify a PR, print a review packet, squash-merge after typed confirmation.
+# Owner-only merge gate: verify a PR, print a review packet, squash-merge after the owner confirms,
+# either typed on the terminal or approved in a Claude Code permission prompt (--approved-sha).
+# Refuse to be sourced, then re-run under bash -p, which ignores shell functions and BASH_ENV/ENV
+# from the caller's environment: imported code could otherwise redefine builtins such as exit
+# (and so turn --packet into a merge). POSIXLY_CORRECT switches this first process to POSIX
+# mode, where the exec builtin is found before any function named exec. Arbitrary code run
+# before line 1 (a BASH_ENV file) can still do anything; see docs/design.md.
+if [[ ${BASH_SOURCE[0]} != "$0" ]]; then printf 'REFUSED: run scripts/land.sh, do not source it\n' >&2; return 1; fi
+if [[ $- != *p* ]]; then
+  POSIXLY_CORRECT=1
+  exec /usr/bin/env -u BASH_ENV -u ENV -u POSIXLY_CORRECT /bin/bash -p -- "$0" "$@"
+fi
 set -euo pipefail
 
 DEFAULT_REPO=''   # resolved from $LAND_REPO or the primary worktree's origin URL
@@ -19,17 +30,39 @@ GATE_PATTERNS=()
 UI_PATTERNS=()
 RISKY_PATTERNS=()
 GATE_PATHS=()
+AUTO_PATTERNS=()
+MODE=terminal      # terminal | packet | approved
+APPROVED_SHA=''
+PREVIEW_CHECKED=0
+RISKY=0
+CHANGED_LINES=0
+AUTO_OUTSIDE=0
+SHADOW=''
+SHADOW_MAX_LINES=150
+PACKET_DONE=0
 CODEX_RESULT='Codex review: not requested'
 
 usage() {
   cat <<'EOF'
 Usage: scripts/land.sh [--codex] [--repo OWNER/NAME] <PR#>
+       scripts/land.sh --packet <PR#>
+       scripts/land.sh --approved-sha <HEAD_SHA> [--preview-checked] <PR#>
 
 Owner-only merge gate. Checks the PR against GitHub's main (CI verify green,
 independent QA PASS on the exact head, up to date, no symlinks/submodules),
-prints a review packet and squash-merges only after confirmation typed on the terminal.
+prints a review packet and squash-merges only after the owner confirms.
 
-  --codex             run scripts/codex-review.sh before confirming
+  (default)           confirmation typed on the terminal (/dev/tty)
+  --packet            run every check and print the review packet, never merge;
+                      agents may run this to show the owner what they would approve
+  --approved-sha SHA  Claude Code only (CLAUDECODE=1): merge the PR if its head is
+                      exactly SHA. The owner's approval is the permission prompt that
+                      the ask rule Bash(scripts/land.sh --approved-sha *) raises; run it
+                      exactly as shown above, from the primary worktree, or the prompt
+                      may not appear. Refuses PRs that change gate files (terminal only).
+  --preview-checked   with --approved-sha: required when UI paths changed; approving
+                      the prompt states that the owner checked the preview
+  --codex             run scripts/codex-review.sh before confirming (terminal only)
   --repo OWNER/NAME   target another repository. The default is $LAND_REPO if
                       set, otherwise OWNER/NAME parsed from the primary
                       worktree's "origin" remote URL on github.com.
@@ -66,6 +99,7 @@ if [ -t 1 ]; then HI=$'\e[1;31m'; BO=$'\e[1m'; NO=$'\e[0m'; else HI=''; BO=''; N
 cleanup() {
   [ -n "$TMP" ] && rm -rf "$TMP"
   if [ "$MERGED" = 1 ] || [ "$HELP" = 1 ]; then :
+  elif [ "$MODE" = packet ] && [ "$PACKET_DONE" = 1 ]; then printf 'Packet only: nothing merged.\n' >&2
   elif [ "$MERGE_STARTED" = 1 ]; then printf 'Not merged by this run as far as it knows: gh pr merge was interrupted or failed; check the PR on GitHub before retrying.\n' >&2
   else printf 'Not merged.\n' >&2; fi
 }
@@ -75,6 +109,11 @@ parse_args() {
     case $1 in
       -h|--help) HELP=1; usage; exit 0 ;;
       --codex) CODEX=1 ;;
+      --packet) [ "$MODE" = terminal ] || die "--packet and --approved-sha are exclusive"; MODE=packet ;;
+      --approved-sha) [ "$MODE" != approved ] || die "--approved-sha given more than once"
+        [ "$MODE" = terminal ] || die "--packet and --approved-sha are exclusive"
+        [ $# -ge 2 ] || die "--approved-sha needs the PR head SHA"; MODE=approved; APPROVED_SHA=$2; shift ;;
+      --preview-checked) PREVIEW_CHECKED=1 ;;
       --repo) [ $# -ge 2 ] || die "--repo needs OWNER/NAME"; REPO=$2; shift ;;
       --repo=*) REPO=${1#--repo=}; [ -n "$REPO" ] || die "--repo needs OWNER/NAME" ;;
       --) shift; while [ $# -gt 0 ]; do [ -z "$PR" ] || die "only one PR number allowed"; PR=$1; shift; done; break ;;
@@ -85,6 +124,27 @@ parse_args() {
   done
   [[ $PR =~ ^[1-9][0-9]*$ ]] || { usage >&2; die "a PR number is required"; }
   if [ -n "$REPO" ]; then valid_repo "$REPO" || die "invalid --repo: $REPO"; fi
+  check_mode
+}
+
+# The non-terminal modes. Their whole command line is what the owner sees in the permission
+# prompt, so options that need a terminal or change the target repository are refused.
+check_mode() {
+  local -a flags=()
+  [ "$CODEX" = 1 ] && flags+=(--codex)
+  [ -n "$REPO" ] && flags+=(--repo)
+  case $MODE in
+    packet)
+      [ ${#flags[@]} -eq 0 ] || die "--packet cannot be combined with ${flags[*]}"
+      [ "$PREVIEW_CHECKED" = 0 ] || die "--preview-checked only applies to --approved-sha" ;;
+    approved)
+      [ ${#flags[@]} -eq 0 ] || die "--approved-sha cannot be combined with ${flags[*]}"
+      [[ $APPROVED_SHA =~ ^[0-9a-f]{40}$ ]] || die "--approved-sha needs the full 40-character head SHA"
+      [ "${CLAUDECODE:-}" = 1 ] \
+        || die "--approved-sha is only for Claude Code sessions, where a permission prompt asks the owner; from a terminal run scripts/land.sh $PR" ;;
+    terminal)
+      [ "$PREVIEW_CHECKED" = 0 ] || die "--preview-checked only applies to --approved-sha" ;;
+  esac
 }
 
 # GitHub owner: alphanumerics and single hyphens; repository: alphanumerics . _ - but not "." or "..".
@@ -303,6 +363,14 @@ load_risky_list() {
   fi
 }
 
+# auto-merge-paths.txt (optional) lists the paths a PR may touch and still count as
+# "would auto-merge" in the shadow verdict. Shadow only: nothing merges without the owner.
+load_auto_list() {
+  if git show "$MAIN_SHA:scripts/auto-merge-paths.txt" >"$TMP/auto-merge-paths.txt" 2>/dev/null; then
+    mapfile -t AUTO_PATTERNS < <(read_patterns "$TMP/auto-merge-paths.txt")
+  fi
+}
+
 # A pattern ending in "/" is a directory prefix (like Allowed paths); anything else is a bash glob.
 match_any() { # path pattern...
   local p=$1 g; shift
@@ -334,12 +402,16 @@ classify() {
     if is_gate "$p"; then GATE=1; GATE_PATHS+=("$p"); say "$line" >>"$TMP/gate"; fi
     if is_ui "$p"; then UI=1; say "$line" >>"$TMP/ui"; fi
     if wants_codex "$p"; then hint=1; fi
+    if [ ${#RISKY_PATTERNS[@]} -gt 0 ] && match_any "$p" "${RISKY_PATTERNS[@]}"; then RISKY=1; fi
+    if [ ${#AUTO_PATTERNS[@]} -eq 0 ] || ! match_any "$p" "${AUTO_PATTERNS[@]}"; then AUTO_OUTSIDE=1; fi
   done <"$TMP/raw"
+  CHANGED_LINES=$(git diff --no-renames --numstat "$BASE" "$HEAD_SHA" \
+    | awk '{ if ($1 ~ /^[0-9]+$/) n += $1; if ($2 ~ /^[0-9]+$/) n += $2 } END { print n + 0 }')
   if [ -n "$special" ]; then
     printf '%s' "$special" | sanitize >&2
     die "PR adds, changes or removes a symlink or submodule"
   fi
-  if [ "$CODEX" = 0 ] && [ "$hint" = 1 ]; then
+  if [ "$CODEX" = 0 ] && [ "$hint" = 1 ] && [ "$MODE" = terminal ]; then
     say "Hint: these changes touch risky paths (scripts/risky-paths.txt) or gate files; re-run with --codex for a Codex review."
   fi
 }
@@ -402,6 +474,33 @@ run_codex() {
   esac
 }
 
+# Shadow verdict: would an automatic merge be allowed for this PR? Recorded, never acted on.
+shadow_verdict() {
+  local -a why=()
+  [ "$GATE" = 1 ] && why+=('gate files')
+  [ "$RISKY" = 1 ] && why+=('risky paths')
+  if [ ${#AUTO_PATTERNS[@]} -eq 0 ]; then why+=('no scripts/auto-merge-paths.txt on main')
+  elif [ "$AUTO_OUTSIDE" = 1 ]; then why+=('paths outside auto-merge-paths.txt'); fi
+  [ "$CHANGED_LINES" -gt "$SHADOW_MAX_LINES" ] && why+=("$CHANGED_LINES changed lines > $SHADOW_MAX_LINES")
+  if [ "$UI" = 1 ] && [[ $PREVIEW == 'No preview'* ]]; then why+=('no preview for this commit'); fi
+  if [ ${#why[@]} -eq 0 ]; then SHADOW='WOULD MERGE'
+  else SHADOW="WOULD HOLD: $(IFS=';'; printf '%s' "${why[*]}" | sed 's/;/; /g')"; fi
+}
+
+# One TSV row per outcome, kept outside the repository so the shadow record survives checkouts.
+# $XDG_STATE_HOME if absolute (the XDG spec ignores relative values), else ~/.local/state;
+# no usable base means no row. A ledger failure never changes the outcome.
+ledger() { # event
+  local base=${XDG_STATE_HOME:-} dir
+  [[ $base == /* ]] || base=${HOME:+$HOME/.local/state}
+  [[ $base == /* ]] || return 0
+  dir="$base/parallel-agent-workflow"
+  [[ $dir == "$TOP" || $dir == "$TOP"/* ]] && return 0   # never inside the repository
+  mkdir -p "$dir" 2>/dev/null || return 0
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$REPO" "$PR" "$HEAD_SHA" "$1" \
+    "$CHANGED_LINES" "$(oneline <<<"$SHADOW" | tr '\t' ' ')" 2>/dev/null >>"$dir/shadow.tsv" || true
+}
+
 group() {
   say "$1"
   if [ -s "$2" ]; then sanitize <"$2"; else say '  (none)'; fi
@@ -436,6 +535,8 @@ print_packet() {
   say 'Independent QA (reported evidence; owner must judge coverage and independence):'
   sanitize <"$TMP/qa.json"
   say "$CODEX_RESULT"
+  say "Changed lines: $CHANGED_LINES"
+  say "Shadow auto-merge: $SHADOW (recorded only; the owner still decides)"
 }
 
 ask() {
@@ -452,6 +553,33 @@ confirm() {
   ask "Type $want to merge (anything else aborts): " "$want"
   if [ "$GATE" = 1 ]; then ask "Gate files changed. Type 'gate' to accept their full diffs: " gate; fi
   if [ "$UI" = 1 ]; then ask "UI changed. Check the preview, then type 'preview checked': " 'preview checked'; fi
+}
+
+# The ask rule and agent-guard both key on the literal spelling scripts/land.sh run from the
+# primary worktree, so --approved-sha runs only under that name there (not via a link or copy).
+check_invocation() {
+  [ "$MODE" = approved ] || return 0
+  [ "$0" = scripts/land.sh ] && [ "$(pwd -P)" = "$TOP" ] \
+    || die "--approved-sha must be run as scripts/land.sh from $TOP, the exact spelling the owner's permission prompt covers"
+}
+
+# --approved-sha: the owner approved this exact command line in the permission prompt.
+approved() {
+  [ "$APPROVED_SHA" = "$HEAD_SHA" ] || die "approved SHA $APPROVED_SHA is not the PR head $HEAD_SHA; get a fresh packet and approval"
+  [ "$GATE" = 0 ] || die "gate files changed: the owner merges this PR from a terminal with scripts/land.sh $PR"
+  if [ "$UI" = 1 ] && [ "$PREVIEW_CHECKED" = 0 ]; then
+    die "UI changed: re-run as scripts/land.sh --approved-sha $HEAD_SHA --preview-checked $PR once the owner has checked the preview"
+  fi
+}
+
+# --packet: what the owner would approve, never a merge.
+packet_done() {
+  local cmd="scripts/land.sh --approved-sha $HEAD_SHA"
+  ledger packet
+  [ "$UI" = 1 ] && cmd+=' --preview-checked'
+  if [ "$GATE" = 1 ]; then say "To merge: gate files changed, so the owner runs scripts/land.sh $PR in a terminal."
+  else say "To merge once the owner has read this packet: $cmd $PR"; fi
+  PACKET_DONE=1
 }
 
 recheck_and_merge() {
@@ -471,6 +599,7 @@ recheck_and_merge() {
   gh pr merge "$PR" -R "$REPO" --squash --match-head-commit "$HEAD_SHA" \
     --subject "$(field .title | oneline) (#$PR)" --body "$(field .url | oneline)" </dev/null || die "gh pr merge failed"
   MERGED=1
+  ledger "merged-$MODE"
   say "Merged PR #$PR at $HEAD_SHA into $REPO main (with a merge queue, gh reports success on enqueue; confirm on GitHub)."
 }
 
@@ -483,6 +612,7 @@ main() {
   set -f            # PR-supplied globs must never expand against the filesystem
   TMP=$(mktemp -d)
   locate_self
+  check_invocation
   check_local_config
   resolve_repo
   check_self
@@ -491,14 +621,20 @@ main() {
   load_gate_list
   load_ui_list
   load_risky_list
+  load_auto_list
   load_qa_rules
   check_current
   classify
   check_ui
   check_qa
   run_codex
+  shadow_verdict
   print_packet
-  confirm
+  case $MODE in
+    packet) packet_done; exit 0 ;;
+    approved) approved ;;
+    terminal) confirm ;;
+  esac
   recheck_and_merge
 }
 

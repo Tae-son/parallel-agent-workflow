@@ -11,6 +11,10 @@ before changing anything. It is the rulebook, and it wins wherever this file is 
   Never write your own QA approval. Your task ends at the verified pull request, not a merge.
 - Never merge, push to `main`, push with `--force` (`--force-with-lease` on your own branch
   only), or run `scripts/land.sh` or `scripts/codex-review.sh`. Do not run `codex` directly.
+  Exceptions: `scripts/land.sh --packet <PR#>` is read-only and allowed. In Claude Code only,
+  when the owner asks you to land a PR, run the exact `--approved-sha` command the packet
+  prints, after posting the packet; the owner's approval of that permission prompt is the
+  merge decision, so never retry it in another form.
   Agents may run Codex smoke tests only when the owner explicitly approves the exact test
   and its isolation boundaries, and only through a named allowlisted scenario in
   `scripts/codex-smoke.sh`. This exception

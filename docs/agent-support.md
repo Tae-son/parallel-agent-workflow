@@ -239,7 +239,7 @@ Before creating trust, the runner checks that its generated fixture registration
 to the reviewed SHA-256
 `e36be1913a9bec5a42d33331074112d1acd5aab776c62272a5bdb714116a184f`, that the
 repository's `.codex/hooks.json` equals those bytes, and that the shared guard script
-hashes to `dd09abf6254d76f84a91418baf2270dd746b67e261428cb9ad49a3de6407d1cd`.
+hashes to `73208fe649fa5c792b62f98c532046cf59a5afa7fe992fce49419022df5bc085`.
 The trusted hash above is the v0.165 identity of that fixture registration, not of the
 kit's tracked `.codex/hooks.json`; the tests check that the fixture embeds the tracked
 command unchanged. The guard pin matters: Codex hashes the hook declaration, not that

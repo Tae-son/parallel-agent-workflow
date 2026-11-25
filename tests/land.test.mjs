@@ -81,6 +81,7 @@ function makeFixture({
   gateListText,
   uiListOnMain = true,
   uiListText,
+  autoListText,
   qaRulesOnMain = true,
   originUrl,
   codexExit,
@@ -107,6 +108,7 @@ function makeFixture({
   else if (gateListOnMain) fs.copyFileSync(gateList, path.join(primary, 'scripts/gate-files.txt'));
   if (uiListText !== undefined) writeFiles(primary, { 'scripts/ui-paths.txt': uiListText });
   else if (uiListOnMain) fs.copyFileSync(uiList, path.join(primary, 'scripts/ui-paths.txt'));
+  if (autoListText !== undefined) writeFiles(primary, { 'scripts/auto-merge-paths.txt': autoListText });
   if (qaRulesOnMain) fs.copyFileSync(qaRules, path.join(primary, 'scripts/independent-qa.jq'));
   if (codexExit !== undefined) {
     writeFiles(primary, { 'scripts/codex-exclude.txt': 'x\n', 'scripts/codex-review-contract.md': 'x\n' });
@@ -175,11 +177,14 @@ let ttyRuns = 0;
 // tty: the answers reach /dev/tty through util-linux `script`. Once its stdin hits EOF it stops servicing
 // the pty for up to 2 s while typed lines are unread, so a shell feeds the answers from a FIFO it holds open
 // read-write; the trailing ^D still makes a prompt past the last answer read EOF. Otherwise: no terminal.
-function land(fx, args = [String(N)], { answers = '', tty = true, landPath, repoEnv = REPO } = {}) {
+function land(fx, args = [String(N)], { answers = '', tty = true, landPath, repoEnv = REPO, claude = false, extraEnv = {} } = {}) {
   const script = landPath ?? path.join(fx.primary, 'scripts/land.sh');
   // TMPDIR: land.sh keeps its land-codex-* review dir on purpose; put it inside the fixture so it is cleaned up too.
   const env = { ...gitEnv, PATH: `${fx.bin}:${process.env.PATH}`, SHELL: '/bin/bash', LAND_GH_STUB_DIR: fx.stub, GIT_CONFIG_GLOBAL: fx.globalConfig ?? '/dev/null', TMPDIR: fx.dir };
   if (repoEnv !== null) env.LAND_REPO = repoEnv; else delete env.LAND_REPO;
+  env.XDG_STATE_HOME = fx.dir; // shadow ledger stays inside the fixture
+  if (claude) env.CLAUDECODE = '1'; else delete env.CLAUDECODE;
+  Object.assign(env, extraEnv);
   const opts = { cwd: fx.primary, env, encoding: 'utf8', timeout: 30000 };
   const r = tty
     ? spawnSync('sh', ['-c', 'mkfifo "$2" && exec 0<>"$2" && printf %s "$0" >&0 && exec script -qec "$1" /dev/null',
@@ -967,4 +972,153 @@ test('a vite.calculator.config.js change is a gate file', () => {
   const split = land(makeFixture({ gateListText, files }), undefined, { answers: typed });
   assertRefused(split, /no confirmation \(EOF\)/);
   assert.match(split.output, /Gate files:\s+A\s+vite\.calculator\.config\.js/);
+});
+
+// ---- Harness approval (--packet, --approved-sha) and the shadow verdict ----
+const ledgerRows = (fx) => {
+  const f = path.join(fx.dir, 'parallel-agent-workflow/shadow.tsv');
+  return fs.existsSync(f) ? fs.readFileSync(f, 'utf8').trim().split('\n').map((l) => l.split('\t')) : [];
+};
+
+test('--packet prints the packet and the exact approval command, never merges', () => {
+  const fx = makeFixture();
+  const r = land(fx, ['--packet', String(N)], { tty: false });
+  assert.equal(r.status, 0, r.output);
+  assert.deepEqual(r.merges, []);
+  assert.match(r.output, /==== Review packet ====/);
+  assert.ok(r.output.includes(`To merge once the owner has read this packet: scripts/land.sh --approved-sha ${fx.headSha} ${N}`), r.output);
+  assert.match(r.output, /Packet only: nothing merged/);
+  const rows = ledgerRows(fx);
+  assert.equal(rows.length, 1);
+  assert.deepEqual(rows[0].slice(1, 5), [REPO, String(N), fx.headSha, 'packet']);
+});
+
+test('--packet on a gate-file PR points the owner to the terminal', () => {
+  const fx = makeFixture({ files: { 'scripts/gate-files.txt': 'tests/*\n' } });
+  const r = land(fx, ['--packet', String(N)], { tty: false });
+  assert.equal(r.status, 0, r.output);
+  assert.match(r.output, /gate files changed, so the owner runs scripts\/land\.sh 7 in a terminal/);
+  assert.doesNotMatch(r.output, /--approved-sha/);
+});
+
+test('--approved-sha merges without a terminal when the head matches (Claude Code)', () => {
+  const fx = makeFixture();
+  const r = land(fx, ['--approved-sha', fx.headSha, String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh' });
+  assertMerged(r, fx);
+  assert.deepEqual(ledgerRows(fx).map((row) => row[4]), ['merged-approved']);
+});
+
+test('--approved-sha refuses outside Claude Code', () => {
+  const fx = makeFixture();
+  assertRefused(land(fx, ['--approved-sha', fx.headSha, String(N)], { tty: false }), /only for Claude Code sessions/);
+});
+
+test('--approved-sha refuses a SHA that is not the PR head', () => {
+  const fx = makeFixture();
+  assertRefused(land(fx, ['--approved-sha', 'b'.repeat(40), String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh' }), /is not the PR head/);
+  assertRefused(land(fx, ['--approved-sha', fx.headSha.slice(0, 12), String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh' }), /full 40-character/);
+});
+
+test('--approved-sha refuses when the head moves after approval', () => {
+  const fx = makeFixture({ recheck: { headRefOid: 'c'.repeat(40) } });
+  assertRefused(land(fx, ['--approved-sha', fx.headSha, String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh' }), /PR head changed since review/);
+});
+
+test('--approved-sha never merges gate-file changes', () => {
+  const fx = makeFixture({ files: { 'package.json': '{}\n' } });
+  assertRefused(land(fx, ['--approved-sha', fx.headSha, String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh' }), /gate files changed: the owner merges this PR from a terminal/);
+});
+
+test('--approved-sha on a UI change needs --preview-checked in the approved command', () => {
+  const body = `${defaultBody}\n\nApproved brief: hero copy per the owner's note\n\nAllowed paths:\n- src/\n`;
+  const fx = makeFixture({ files: { 'src/app.js': 'export const x = 1;\n' }, pr: { body } });
+  assertRefused(land(fx, ['--approved-sha', fx.headSha, String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh' }), /UI changed: re-run as scripts\/land\.sh --approved-sha [0-9a-f]{40} --preview-checked 7/);
+  assertMerged(land(fx, ['--approved-sha', fx.headSha, '--preview-checked', String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh' }), fx);
+});
+
+test('non-terminal modes refuse options the approval prompt would not show', () => {
+  const fx = makeFixture();
+  assertRefused(land(fx, ['--approved-sha', fx.headSha, '--codex', String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh' }), /cannot be combined with --codex/);
+  assertRefused(land(fx, ['--packet', '--repo', REPO, String(N)], { tty: false }), /cannot be combined with --repo/);
+  assertRefused(land(fx, ['--packet', '--approved-sha', fx.headSha, String(N)], { tty: false }), /are exclusive/);
+  assertRefused(land(fx, ['--preview-checked', String(N)], { answers: typed }), /only applies to --approved-sha/);
+});
+
+test('shadow verdict holds without auto-merge-paths.txt and would merge inside it', () => {
+  const hold = makeFixture();
+  const r1 = land(hold, ['--packet', String(N)], { tty: false });
+  assert.match(r1.output, /Shadow auto-merge: WOULD HOLD: no scripts\/auto-merge-paths\.txt on main/);
+  const ok = makeFixture({ autoListText: '# content\ndocs/\n' });
+  const r2 = land(ok, ['--packet', String(N)], { tty: false });
+  assert.match(r2.output, /Changed lines: 2\n/);
+  assert.match(r2.output, /Shadow auto-merge: WOULD MERGE/);
+  const big = makeFixture({ autoListText: 'docs/\n', files: { 'docs/notes.md': 'x\n'.repeat(200) } });
+  assert.match(land(big, ['--packet', String(N)], { tty: false }).output, /WOULD HOLD: 201 changed lines > 150/);
+  const outside = makeFixture({ autoListText: 'docs/\n', files: { 'README.md': 'changed\n' } });
+  assert.match(land(outside, ['--packet', String(N)], { tty: false }).output, /WOULD HOLD: paths outside auto-merge-paths\.txt/);
+});
+
+test('a terminal merge is recorded in the shadow ledger', () => {
+  const fx = makeFixture();
+  assertMerged(land(fx, undefined, { answers: typed }), fx);
+  assert.deepEqual(ledgerRows(fx).map((row) => row[4]), ['merged-terminal']);
+});
+
+test('--approved-sha runs only as scripts/land.sh from the primary worktree (no links or copies)', () => {
+  const fx = makeFixture();
+  fs.symlinkSync(path.join(fx.primary, 'scripts/land.sh'), path.join(fx.primary, 'l'));
+  assertRefused(land(fx, ['--approved-sha', fx.headSha, String(N)], { tty: false, claude: true, landPath: './l' }), /must be run as scripts\/land\.sh from/);
+  assertRefused(land(fx, ['--approved-sha', fx.headSha, String(N)], { tty: false, claude: true }), /must be run as scripts\/land\.sh from/);
+});
+
+test('imported shell functions and BASH_ENV cannot turn --packet into a merge', () => {
+  const fx = makeFixture();
+  const evil = path.join(fx.dir, 'evil.sh');
+  const swallow = '[ "${1:-0}" = 0 ] || builtin exit "$@"';
+  fs.writeFileSync(evil, `exit() { ${swallow}; }\n`);
+  const evilExec = path.join(fx.dir, 'evil-exec.sh');
+  fs.writeFileSync(evilExec, `exit() { ${swallow}; }\nexec() { :; }\n`);
+  for (const extraEnv of [{ BASH_ENV: evil }, { BASH_ENV: evilExec }, { 'BASH_FUNC_exit%%': `() { ${swallow}\n}` },
+    { 'BASH_FUNC_exit%%': `() { ${swallow}\n}`, 'BASH_FUNC_exec%%': '() { :\n}' }]) {
+    const r = land(fx, ['--packet', String(N)], { tty: false, extraEnv });
+    assert.equal(r.status, 0, r.output);
+    assert.deepEqual(r.merges, [], `${JSON.stringify(Object.keys(extraEnv))}: ${r.output}`);
+    assert.match(r.output, /Packet only: nothing merged/);
+  }
+});
+
+test('sourcing land.sh is refused', () => {
+  const fx = makeFixture();
+  const r = spawnSync('bash', ['-c', `source scripts/land.sh --packet ${N}`], { cwd: fx.primary, encoding: 'utf8',
+    env: { ...gitEnv, PATH: `${fx.bin}:${process.env.PATH}`, LAND_GH_STUB_DIR: fx.stub, LAND_REPO: REPO, XDG_STATE_HOME: fx.dir } });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /do not source it/);
+  assert.equal(fs.existsSync(path.join(fx.stub, 'merge.log')), false);
+});
+
+test('the ledger never writes into the repository and never changes the outcome', () => {
+  const rel = makeFixture();
+  assertMerged(land(rel, ['--approved-sha', rel.headSha, String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh', extraEnv: { XDG_STATE_HOME: 'relstate', HOME: rel.dir } }), rel);
+  assert.equal(fs.existsSync(path.join(rel.primary, 'relstate')), false, 'relative XDG_STATE_HOME is ignored');
+  assert.ok(fs.existsSync(path.join(rel.dir, '.local/state/parallel-agent-workflow/shadow.tsv')), 'falls back to $HOME/.local/state');
+  const ro = makeFixture();
+  const lockedDir = path.join(ro.dir, 'locked');
+  fs.mkdirSync(path.join(lockedDir, 'parallel-agent-workflow'), { recursive: true });
+  fs.chmodSync(path.join(lockedDir, 'parallel-agent-workflow'), 0o500);
+  const r = land(ro, ['--packet', String(N)], { tty: false, extraEnv: { XDG_STATE_HOME: lockedDir } });
+  fs.chmodSync(path.join(lockedDir, 'parallel-agent-workflow'), 0o700);
+  assert.equal(r.status, 0, r.output);
+  assert.doesNotMatch(r.output, /Permission denied/);
+});
+
+test('--approved-sha given twice names the real problem', () => {
+  const fx = makeFixture();
+  assertRefused(land(fx, ['--approved-sha', fx.headSha, '--approved-sha', fx.headSha, String(N)], { tty: false, claude: true, landPath: 'scripts/land.sh' }), /given more than once/);
+});
+
+test('an XDG_STATE_HOME inside the repository is not used for the ledger', () => {
+  const fx = makeFixture();
+  const r = land(fx, ['--packet', String(N)], { tty: false, extraEnv: { XDG_STATE_HOME: fx.primary } });
+  assert.equal(r.status, 0, r.output);
+  assert.equal(fs.existsSync(path.join(fx.primary, 'parallel-agent-workflow')), false);
 });

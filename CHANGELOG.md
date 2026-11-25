@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+- Owner approval from T3, Claude Code only. `scripts/land.sh --packet <PR#>` runs every check
+  and prints the review packet without merging. `scripts/land.sh --approved-sha <SHA>
+  [--preview-checked] <PR#>` merges without a terminal when `CLAUDECODE=1`, the head is
+  exactly SHA and no gate file changed; the owner's approval is the permission prompt raised
+  by the new ask rule `Bash(scripts/land.sh --approved-sha *)` in `.claude/settings.json`.
+  `agent-guard` allows `--packet` for every runtime and the exact `--approved-sha` spelling
+  only when run with `--claude-ask-rule` (Claude Code's hook entry); Codex and Hermes stay
+  blocked. Packets print a shadow auto-merge verdict and every packet or merge appends to
+  `$XDG_STATE_HOME/parallel-agent-workflow/shadow.tsv` (default `~/.local/state`); optional
+  `scripts/auto-merge-paths.txt` lists paths eligible for the shadow verdict. `land.sh` now
+  re-runs itself under `bash -p` (imported functions and `BASH_ENV` ignored) and refuses to be
+  sourced; `--approved-sha` runs only as `scripts/land.sh` from the primary worktree.
+  `install.sh` adds the ask rule and `--claude-ask-rule` together when it merges into an
+  existing `.claude/settings.json`, and leaves an existing guard registration alone.
+  `codex-smoke.sh` pins the new guard hash.
+
 - Independent QA rules moved, unchanged, from `scripts/land.sh` into one jq module,
   `scripts/independent-qa.jq`. `land.sh` reads it from main's exact commit (never the PR or
   the working tree) and refuses when it is missing on main or does not compile. `install.sh`

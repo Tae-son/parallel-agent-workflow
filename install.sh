@@ -246,7 +246,10 @@ else
   merged=$(node - "$settings" <<'JS' || echo error
 const fs = require('node:fs');
 const file = process.argv[2];
-const cmd = 'node "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-guard.mjs"';
+// The --claude-ask-rule flag and the ask rule are added together or not at all: the flag
+// alone would let the exact --approved-sha command through with no owner prompt.
+const cmd = 'node "$CLAUDE_PROJECT_DIR/.claude/hooks/agent-guard.mjs" --claude-ask-rule';
+const askRule = 'Bash(scripts/land.sh --approved-sha *)';
 const isObj = (v) => typeof v === 'object' && v !== null && !Array.isArray(v);
 try {
   const s = JSON.parse(fs.readFileSync(file, 'utf8').replace(/^﻿/, ''));
@@ -257,6 +260,11 @@ try {
   const registered = (pre ?? []).some((e) => isObj(e) && Array.isArray(e.hooks)
     && e.hooks.some((h) => isObj(h) && typeof h.command === 'string' && h.command.includes('agent-guard.mjs')));
   if (registered) { console.log('present'); process.exit(0); }
+  if (s.permissions !== undefined && !isObj(s.permissions)) throw new Error('permissions is not an object');
+  if (s.permissions?.ask !== undefined && !Array.isArray(s.permissions.ask)) throw new Error('permissions.ask is not an array');
+  s.permissions ??= {};
+  s.permissions.ask ??= [];
+  if (!s.permissions.ask.includes(askRule)) s.permissions.ask.push(askRule);
   s.hooks ??= {};
   s.hooks.PreToolUse ??= [];
   s.hooks.PreToolUse.push({ matcher: 'Bash', hooks: [{ type: 'command', command: cmd }] });
@@ -268,8 +276,8 @@ try {
 JS
 )
   case $merged in
-    merged) updated+=("$st_rel (agent-guard PreToolUse hook added; file re-serialised with two-space indentation)") ;;
-    present) skipped+=("$st_rel (agent-guard hook already registered)") ;;
+    merged) updated+=("$st_rel (agent-guard PreToolUse hook and the land.sh --approved-sha ask rule added; file re-serialised with two-space indentation)") ;;
+    present) skipped+=("$st_rel (agent-guard hook already registered; left as is, so T3 approval stays off until you add --claude-ask-rule and the ask rule together, see the kit's .claude/settings.json)") ;;
     *) refused+=("$st_rel (${merged#unsupported: }; register the hook by hand, see .claude/settings.json in the kit)") ;;
   esac
 fi
